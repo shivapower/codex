@@ -6418,7 +6418,8 @@
         "userPromptSubmit",
         "subagentStart",
         "subagentStop",
-        "stop"
+        "stop",
+        "interrupt"
       ],
       "type": "string"
     },
@@ -7324,6 +7325,12 @@
     },
     "ManagedHooksRequirements": {
       "properties": {
+        "Interrupt": {
+          "items": {
+            "$ref": "#/definitions/ConfiguredHookMatcherGroup"
+          },
+          "type": "array"
+        },
         "PermissionRequest": {
           "items": {
             "$ref": "#/definitions/ConfiguredHookMatcherGroup"
@@ -7398,6 +7405,7 @@
         }
       },
       "required": [
+        "Interrupt",
         "PermissionRequest",
         "PostCompact",
         "PostToolUse",

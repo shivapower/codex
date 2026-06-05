@@ -13,6 +13,7 @@ use codex_protocol::protocol::HookScope;
 
 use super::CommandShell;
 use super::ConfiguredHandler;
+use super::command_runner::CommandExecutionPolicy;
 use super::command_runner::CommandRunResult;
 use super::command_runner::run_command;
 use crate::events::common::matches_matcher;
@@ -52,7 +53,8 @@ pub(crate) fn select_handlers_for_matcher_inputs(
             | HookEventName::SubagentStart
             | HookEventName::SubagentStop
             | HookEventName::PreCompact
-            | HookEventName::PostCompact => {
+            | HookEventName::PostCompact
+            | HookEventName::Interrupt => {
                 if matcher_inputs.is_empty() {
                     matches_matcher(handler.matcher.as_deref(), /*input*/ None)
                 } else {
@@ -94,12 +96,33 @@ pub(crate) async fn execute_handlers<T>(
     turn_id: Option<String>,
     parse: fn(&ConfiguredHandler, CommandRunResult, Option<String>) -> ParsedHandler<T>,
 ) -> Vec<ParsedHandler<T>> {
+    execute_handlers_with_policy(
+        shell,
+        handlers,
+        input_json,
+        cwd,
+        turn_id,
+        CommandExecutionPolicy::Standard,
+        parse,
+    )
+    .await
+}
+
+pub(crate) async fn execute_handlers_with_policy<T>(
+    shell: &CommandShell,
+    handlers: Vec<ConfiguredHandler>,
+    input_json: String,
+    cwd: &Path,
+    turn_id: Option<String>,
+    execution_policy: CommandExecutionPolicy,
+    parse: fn(&ConfiguredHandler, CommandRunResult, Option<String>) -> ParsedHandler<T>,
+) -> Vec<ParsedHandler<T>> {
     let mut pending = FuturesUnordered::new();
     for (configured_order, handler) in handlers.into_iter().enumerate() {
         let input_json = input_json.clone();
         let turn_id = turn_id.clone();
         pending.push(async move {
-            let result = run_command(shell, &handler, &input_json, cwd).await;
+            let result = run_command(shell, &handler, &input_json, cwd, execution_policy).await;
             (configured_order, parse(&handler, result, turn_id))
         });
     }
@@ -149,7 +172,8 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         | HookEventName::PostCompact
         | HookEventName::UserPromptSubmit
         | HookEventName::SubagentStop
-        | HookEventName::Stop => HookScope::Turn,
+        | HookEventName::Stop
+        | HookEventName::Interrupt => HookScope::Turn,
     }
 }
 
@@ -205,6 +229,53 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].display_order, 0);
         assert_eq!(selected[1].display_order, 1);
+    }
+
+    #[test]
+    fn select_handlers_filters_interrupt_matchers() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::Interrupt,
+                Some("^auto_review$"),
+                "echo first",
+                /*display_order*/ 0,
+            ),
+            make_handler(
+                HookEventName::Interrupt,
+                /*matcher*/ None,
+                "echo second",
+                /*display_order*/ 1,
+            ),
+        ];
+
+        let selected = select_handlers(&handlers, HookEventName::Interrupt, Some("auto_review"));
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].display_order, 0);
+        assert_eq!(selected[1].display_order, 1);
+    }
+
+    #[test]
+    fn select_handlers_excludes_non_matching_interrupt_handlers() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::Interrupt,
+                Some("^auto_review$"),
+                "echo first",
+                /*display_order*/ 0,
+            ),
+            make_handler(
+                HookEventName::Interrupt,
+                Some("^shutdown$"),
+                "echo second",
+                /*display_order*/ 1,
+            ),
+        ];
+
+        let selected = select_handlers(&handlers, HookEventName::Interrupt, Some("auto_review"));
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
     }
 
     #[test]
