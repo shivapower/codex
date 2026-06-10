@@ -9,8 +9,12 @@ use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use std::future::Future;
 use std::io;
 use std::path::Path;
+use std::pin::Pin;
+
+pub const DEFAULT_FILE_STREAM_CHUNK_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CreateDirectoryOptions {
@@ -35,6 +39,19 @@ pub struct FileMetadata {
     pub is_symlink: bool,
     pub created_at_ms: i64,
     pub modified_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenFileMetadata {
+    pub size_bytes: u64,
+    pub created_at_ms: i64,
+    pub modified_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileReadChunk {
+    pub data: Vec<u8>,
+    pub eof: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,6 +146,42 @@ fn file_system_policy_has_cwd_dependent_entries(
 
 pub type FileSystemResult<T> = io::Result<T>;
 
+/// An open file object used for bounded positional reads.
+///
+/// Implementations must keep reads attached to the opened file object rather
+/// than resolving the original path again for each operation.
+pub trait FileReadHandle: Send + Sync {
+    fn max_chunk_bytes(&self) -> usize;
+
+    fn read(
+        &self,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = FileSystemResult<FileReadChunk>> + Send + '_>>;
+
+    fn metadata(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = FileSystemResult<OpenFileMetadata>> + Send + '_>>;
+
+    fn close(&self) -> Pin<Box<dyn Future<Output = FileSystemResult<()>> + Send + '_>>;
+}
+
+/// An open file used for bounded sequential writes.
+///
+/// Implementations must match ordinary whole-file write behavior: opening the
+/// handle creates or truncates the destination, and writes append complete
+/// chunks to that open file object.
+pub trait FileWriteHandle: Send + Sync {
+    fn max_chunk_bytes(&self) -> usize;
+
+    fn write<'a>(
+        &'a self,
+        data: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = FileSystemResult<()>> + Send + 'a>>;
+
+    fn close(&self) -> Pin<Box<dyn Future<Output = FileSystemResult<()>> + Send + '_>>;
+}
+
 /// Abstract filesystem access used by components that may operate locally or via
 /// a remote environment.
 #[async_trait]
@@ -172,6 +225,28 @@ pub trait ExecutorFileSystem: Send + Sync {
         contents: Vec<u8>,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<()>;
+
+    async fn open_file_for_read(
+        &self,
+        _path: &AbsolutePathBuf,
+        _sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<Box<dyn FileReadHandle>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "streaming file reads are not supported by this filesystem",
+        ))
+    }
+
+    async fn open_file_for_write(
+        &self,
+        _path: &AbsolutePathBuf,
+        _sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<Box<dyn FileWriteHandle>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "streaming file writes are not supported by this filesystem",
+        ))
+    }
 
     async fn create_directory(
         &self,

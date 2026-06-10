@@ -180,6 +180,8 @@ Example with notification opt-out:
 - `process/exited` — experimental; notification emitted when a `process/spawn` session exits.
 - `fs/readFile` — read an absolute file path and return `{ dataBase64 }`.
 - `fs/writeFile` — write an absolute file path from base64-encoded `{ dataBase64 }`; returns `{}`.
+- `fs/readFile/open`, `fs/readFile/read`, `fs/readFile/stat`, `fs/readFile/close` — bounded positional reads through a connection-scoped file handle.
+- `fs/writeFile/open`, `fs/writeFile/write`, `fs/writeFile/close` — bounded sequential writes that create or truncate the destination directly.
 - `fs/createDirectory` — create an absolute directory path; `recursive` defaults to `true`.
 - `fs/getMetadata` — return metadata for an absolute path: `isDirectory`, `isFile`, `isSymlink`, `createdAtMs`, and `modifiedAtMs`.
 - `fs/readDirectory` — list direct child entries for an absolute directory path; each entry contains `fileName`, `isDirectory`, and `isFile`, and `fileName` is just the child name, not a path.
@@ -1172,6 +1174,11 @@ All filesystem paths in this section must be absolute.
 - `fs/createDirectory` defaults `recursive` to `true` when omitted.
 - `fs/remove` defaults both `recursive` and `force` to `true` when omitted.
 - `fs/readFile` always returns base64 bytes via `dataBase64`, and `fs/writeFile` always expects base64 bytes in `dataBase64`.
+- Streaming file handles use caller-supplied `handleId` values scoped to one connection. Each connection may have at most 64 opening or open file handles. The server advertises a 262144-byte decoded chunk limit from each open response.
+- `fs/readFile/read` is positional: pass an absolute byte `offset` and optional `maxBytes`. `eof` reports whether more bytes were available at that read; a growing file may later return more data.
+- `fs/readFile/stat` reads metadata from the opened file object, so it remains valid if the original path is renamed or replaced.
+- Opening a streamed write creates or truncates the destination immediately. Completed chunks are visible immediately, and cancellation, disconnection, or an I/O error may leave a partially written file. Existing file identity and metadata are preserved like `fs/writeFile`.
+- `fs/readFile/close` and `fs/writeFile/close` are idempotent and serialized with other operations for the same handle. Close waits for an active operation to finish and prevents a pending open from becoming live. Disconnecting closes all handles owned by that connection.
 - `fs/copy` handles both file copies and directory-tree copies; it requires `recursive: true` when `sourcePath` is a directory. Recursive copies traverse regular files, directories, and symlinks; other entry types are skipped.
 
 ### Example: Filesystem watch

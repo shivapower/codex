@@ -98,6 +98,7 @@ pub enum ClientRequestSerializationScope {
     CommandExecProcess { process_id: String },
     Process { process_handle: String },
     FuzzyFileSearchSession { session_id: String },
+    FileHandle { handle_id: String },
     FsWatch { watch_id: String },
     McpOauth { server_name: String },
 }
@@ -155,6 +156,11 @@ macro_rules! serialization_scope_expr {
     ($actual_params:ident, fuzzy_session_id($params:ident . $field:ident)) => {
         Some(ClientRequestSerializationScope::FuzzyFileSearchSession {
             session_id: $actual_params.$field.clone(),
+        })
+    };
+    ($actual_params:ident, file_handle_id($params:ident . $field:ident)) => {
+        Some(ClientRequestSerializationScope::FileHandle {
+            handle_id: $actual_params.$field.clone(),
         })
     };
     ($actual_params:ident, fs_watch_id($params:ident . $field:ident)) => {
@@ -711,6 +717,41 @@ client_request_definitions! {
         params: v2::FsWriteFileParams,
         serialization: None,
         response: v2::FsWriteFileResponse,
+    },
+    FsReadFileOpen => "fs/readFile/open" {
+        params: v2::FsReadFileOpenParams,
+        serialization: file_handle_id(params.handle_id),
+        response: v2::FsReadFileOpenResponse,
+    },
+    FsReadFileRead => "fs/readFile/read" {
+        params: v2::FsReadFileReadParams,
+        serialization: file_handle_id(params.handle_id),
+        response: v2::FsReadFileReadResponse,
+    },
+    FsReadFileStat => "fs/readFile/stat" {
+        params: v2::FsReadFileStatParams,
+        serialization: file_handle_id(params.handle_id),
+        response: v2::FsReadFileStatResponse,
+    },
+    FsReadFileClose => "fs/readFile/close" {
+        params: v2::FsReadFileCloseParams,
+        serialization: file_handle_id(params.handle_id),
+        response: v2::FsReadFileCloseResponse,
+    },
+    FsWriteFileOpen => "fs/writeFile/open" {
+        params: v2::FsWriteFileOpenParams,
+        serialization: file_handle_id(params.handle_id),
+        response: v2::FsWriteFileOpenResponse,
+    },
+    FsWriteFileWrite => "fs/writeFile/write" {
+        params: v2::FsWriteFileWriteParams,
+        serialization: file_handle_id(params.handle_id),
+        response: v2::FsWriteFileWriteResponse,
+    },
+    FsWriteFileClose => "fs/writeFile/close" {
+        params: v2::FsWriteFileCloseParams,
+        serialization: file_handle_id(params.handle_id),
+        response: v2::FsWriteFileCloseResponse,
     },
     FsCreateDirectory => "fs/createDirectory" {
         params: v2::FsCreateDirectoryParams,
@@ -1745,6 +1786,32 @@ mod tests {
             fs_watch.serialization_scope(),
             Some(ClientRequestSerializationScope::FsWatch {
                 watch_id: "watch-1".to_string()
+            })
+        );
+
+        let read_file_close = ClientRequest::FsReadFileClose {
+            request_id: request_id(),
+            params: v2::FsReadFileCloseParams {
+                handle_id: "file-1".to_string(),
+            },
+        };
+        assert_eq!(
+            read_file_close.serialization_scope(),
+            Some(ClientRequestSerializationScope::FileHandle {
+                handle_id: "file-1".to_string()
+            })
+        );
+
+        let write_file_close = ClientRequest::FsWriteFileClose {
+            request_id: request_id(),
+            params: v2::FsWriteFileCloseParams {
+                handle_id: "file-1".to_string(),
+            },
+        };
+        assert_eq!(
+            write_file_close.serialization_scope(),
+            Some(ClientRequestSerializationScope::FileHandle {
+                handle_id: "file-1".to_string()
             })
         );
 
