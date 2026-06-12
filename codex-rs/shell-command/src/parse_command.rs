@@ -49,13 +49,12 @@ pub fn parse_command(command: &[String]) -> Vec<ParsedCommand> {
 
 fn single_unknown_for_command(command: &[String]) -> ParsedCommand {
     if let Some((_, shell_command)) = extract_shell_command(command) {
-        ParsedCommand::Unknown {
+        return ParsedCommand::Unknown {
             cmd: shell_command.to_string(),
-        }
-    } else {
-        ParsedCommand::Unknown {
-            cmd: shlex_join(command),
-        }
+        };
+    }
+    ParsedCommand::Unknown {
+        cmd: shlex_join(command),
     }
 }
 
@@ -74,6 +73,61 @@ mod tests {
 
     fn vec_str(args: &[&str]) -> Vec<String> {
         args.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn shell_wrapper_with_positional_args_remains_intact() {
+        let parsed = parse_command(&vec_str(&[
+            "bash",
+            "-c",
+            "echo \"$0\" \"$1\"",
+            "tool",
+            "arg",
+        ]));
+        assert_eq!(
+            parsed,
+            vec![ParsedCommand::Unknown {
+                cmd: "bash -c 'echo \"$0\" \"$1\"' tool arg".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn three_element_shapes_match_strict_extract_bash_command() {
+        // For every input the strict matcher accepts, both helpers must
+        // produce the same (shell, script), so single_unknown_for_command
+        // doesn't change behaviour for 3-element argv.
+        let cases: &[&[&str]] = &[
+            &["bash", "-c", "echo hi"],
+            &["bash", "-lc", "echo hi"],
+            &["zsh", "-c", "echo hi"],
+            &["zsh", "-lc", "echo hi"],
+            &["sh", "-c", "echo hi"],
+            &["/bin/bash", "-lc", "cat foo"],
+            &["/opt/homebrew/bin/zsh", "-lc", "touch /tmp/foo"],
+        ];
+        for &argv_strs in cases {
+            let argv: Vec<String> = argv_strs.iter().map(|s| (*s).to_string()).collect();
+            let strict = crate::bash::extract_bash_command(&argv);
+            let joined = crate::bash::extract_bash_command_joined(&argv);
+            match (strict, joined) {
+                (Some((s_shell, s_script)), Some((j_shell, j_script))) => {
+                    assert_eq!(s_shell, j_shell.as_str(), "shell mismatch for {argv:?}");
+                    assert_eq!(s_script, j_script.as_str(), "script mismatch for {argv:?}");
+                }
+                (None, None) => {}
+                (s, j) => panic!("acceptance mismatch for {argv:?}: strict={s:?}, joined={j:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn three_element_shape_with_disallowed_flag_remains_unrecognised() {
+        // Negative side of the invariant: a flag strict rejects (`-x`) must
+        // also be rejected by the joined helper.
+        let argv = vec_str(&["bash", "-x", "echo hi"]);
+        assert!(crate::bash::extract_bash_command(&argv).is_none());
+        assert!(crate::bash::extract_bash_command_joined(&argv).is_none());
     }
 
     fn assert_parsed(args: &[String], expected: Vec<ParsedCommand>) {

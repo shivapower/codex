@@ -16,6 +16,16 @@ pub(crate) fn strip_bash_lc_and_escape(command: &[String]) -> String {
     escape_command(command)
 }
 
+pub(crate) fn strip_shell_wrapper_for_display(command: &[String]) -> String {
+    if let Some((_, script)) = extract_shell_command(command) {
+        return script.to_string();
+    }
+    if let Some((_, script)) = codex_shell_command::bash::extract_bash_command_joined(command) {
+        return script;
+    }
+    escape_command(command)
+}
+
 pub(crate) fn split_command_string(command: &str) -> Vec<String> {
     let Some(parts) = shlex::split(command) else {
         return vec![command.to_string()];
@@ -82,6 +92,30 @@ mod tests {
         let args = vec!["/bin/bash".into(), "-lc".into(), "echo hello".into()];
         let cmdline = strip_bash_lc_and_escape(&args);
         assert_eq!(cmdline, "echo hello");
+
+        // Approval displays must preserve positional arguments after the
+        // script rather than treating them as more script text.
+        let args = vec![
+            "bash".into(),
+            "-c".into(),
+            "rm -rf \"$1\"".into(),
+            "sh".into(),
+            "/tmp/target".into(),
+        ];
+        let cmdline = strip_bash_lc_and_escape(&args);
+        assert_eq!(cmdline, "bash -c 'rm -rf \"$1\"' sh /tmp/target");
+    }
+
+    #[test]
+    fn strip_shell_wrapper_for_display_handles_flattened_argv() {
+        let args = vec![
+            "/bin/zsh".into(),
+            "-lc".into(),
+            "python3".into(),
+            "build.py".into(),
+        ];
+        let cmdline = strip_shell_wrapper_for_display(&args);
+        assert_eq!(cmdline, "python3 build.py");
     }
 
     #[test]
