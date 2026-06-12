@@ -256,14 +256,6 @@ impl ChatWidget {
         // Ensure the status indicator is visible while the command runs.
         self.bottom_pane.ensure_status_indicator();
         let parsed_cmd = self.annotate_skill_reads_in_parsed_cmd(parsed_cmd);
-        self.running_commands.insert(
-            id.clone(),
-            RunningCommand {
-                command: command.clone(),
-                parsed_cmd: parsed_cmd.clone(),
-                source,
-            },
-        );
         let is_wait_interaction = matches!(source, ExecCommandSource::UnifiedExecInteraction);
         let command_display = command.join(" ");
         let should_suppress_unified_wait = is_wait_interaction
@@ -280,6 +272,19 @@ impl ChatWidget {
             self.suppressed_exec_calls.insert(id);
             return;
         }
+        self.running_command_seq = self.running_command_seq.wrapping_add(/*rhs*/ 1);
+        self.running_commands.insert(
+            id.clone(),
+            RunningCommand {
+                command: command.clone(),
+                parsed_cmd: parsed_cmd.clone(),
+                source,
+                start_order: self.running_command_seq,
+            },
+        );
+        let activity = crate::tab_status::format_parsed_command_for_tab_status(&parsed_cmd)
+            .unwrap_or_else(|| crate::tab_status::format_command_for_tab_status(&command));
+        self.bottom_pane.set_current_activity(Some(activity));
         if let Some(cell) = self
             .transcript
             .active_cell
@@ -355,6 +360,8 @@ impl ChatWidget {
         let aggregated_output = aggregated_output.unwrap_or_default();
 
         let running = self.running_commands.remove(&id);
+        let next_activity = next_running_command_tab_detail(&self.running_commands);
+        self.bottom_pane.set_current_activity(next_activity);
         if self.suppressed_exec_calls.remove(&id) {
             return;
         }
@@ -457,3 +464,17 @@ impl ChatWidget {
         }
     }
 }
+
+/// Formats the most-recently-started surviving command for tab status.
+fn next_running_command_tab_detail(
+    running: &std::collections::HashMap<String, RunningCommand>,
+) -> Option<String> {
+    running.values().max_by_key(|rc| rc.start_order).map(|rc| {
+        crate::tab_status::format_parsed_command_for_tab_status(&rc.parsed_cmd)
+            .unwrap_or_else(|| crate::tab_status::format_command_for_tab_status(&rc.command))
+    })
+}
+
+#[cfg(test)]
+#[path = "command_lifecycle_tests.rs"]
+mod tests;

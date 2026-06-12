@@ -1295,6 +1295,10 @@ impl BottomPaneView for RequestUserInputOverlay {
         true
     }
 
+    fn tab_status_detail(&self) -> Option<String> {
+        Some("Tool input request".to_string())
+    }
+
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         if self.confirm_unanswered_active() {
             self.close_unanswered_confirmation();
