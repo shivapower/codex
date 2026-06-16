@@ -8340,6 +8340,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
         check_for_update_on_startup: None,
         otel: None,
         allow_login_shell: None,
+        shell_environment_policy: None,
         feedback: None,
         allowed_approval_policies: None,
         allowed_approvals_reviewers: None,
@@ -11167,6 +11168,72 @@ zz_overflow = {configured_overflow:?}
     assert!(config.startup_warnings.iter().any(|warning| {
         warning.contains("otel.tracestate.vendor.zz_overflow")
             && warning.contains("would invalidate tracestate required by")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_shell_environment_policy_overrides_matching_patterns() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"
+[shell_environment_policy]
+ignore_default_excludes = true
+exclude = ["USER_*", "FLIP_TO_INCLUDE"]
+include_only = ["HOME", "FLIP_TO_EXCLUDE"]
+
+[shell_environment_policy.set]
+CONFIGURED = "kept"
+CONFIGURED_SECRET = "removed"
+MANAGED = "old"
+MANAGED_BLOCKED = "removed"
+"#,
+    )?;
+    let config = load_with_enterprise_requirement(
+        &codex_home,
+        r#"
+[shell_environment_policy]
+ignore_default_excludes = false
+
+[shell_environment_policy.filters]
+"FLIP_TO_EXCLUDE" = "exclude"
+"FLIP_TO_INCLUDE" = "include"
+"MANAGED_*" = "exclude"
+
+[shell_environment_policy.set]
+MANAGED = "required"
+MANAGED_SECRET_ALLOWED = "required"
+"#,
+    )
+    .await?;
+
+    let expected_set = HashMap::from([
+        ("CONFIGURED".to_string(), "kept".to_string()),
+        ("MANAGED".to_string(), "required".to_string()),
+        ("MANAGED_SECRET_ALLOWED".to_string(), "required".to_string()),
+    ]);
+    #[cfg(target_os = "windows")]
+    let expected_set = expected_set
+        .into_iter()
+        .map(|(key, value)| (key.to_ascii_lowercase(), value))
+        .collect();
+    let expected: codex_protocol::config_types::ShellEnvironmentPolicy =
+        codex_config::types::ShellEnvironmentPolicyToml {
+            ignore_default_excludes: Some(false),
+            exclude: Some(vec![
+                "USER_*".to_string(),
+                "flip_to_exclude".to_string(),
+                "managed_*".to_string(),
+            ]),
+            include_only: Some(vec!["HOME".to_string(), "flip_to_include".to_string()]),
+            r#set: Some(expected_set),
+            ..Default::default()
+        }
+        .into();
+    assert_eq!(config.permissions.shell_environment_policy, expected);
+    assert!(config.startup_warnings.iter().any(|warning| {
+        warning.contains("Configured values under `shell_environment_policy` are overridden")
     }));
     Ok(())
 }
