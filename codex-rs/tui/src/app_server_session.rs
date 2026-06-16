@@ -455,6 +455,16 @@ impl AppServerSession {
         config: Config,
         thread_id: ThreadId,
     ) -> Result<AppServerStartedThread> {
+        self.resume_thread_with_path(config, thread_id, /*path*/ None)
+            .await
+    }
+
+    pub(crate) async fn resume_thread_with_path(
+        &mut self,
+        config: Config,
+        thread_id: ThreadId,
+        path: Option<std::path::PathBuf>,
+    ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(&config);
         let response: ThreadResumeResponse = self
@@ -464,6 +474,7 @@ impl AppServerSession {
                 params: thread_resume_params_from_config(
                     session_config,
                     thread_id,
+                    path,
                     self.thread_params_mode(),
                     self.remote_cwd_override.as_deref(),
                 ),
@@ -487,6 +498,16 @@ impl AppServerSession {
         config: Config,
         thread_id: ThreadId,
     ) -> Result<AppServerStartedThread> {
+        self.fork_thread_with_path(config, thread_id, /*path*/ None)
+            .await
+    }
+
+    pub(crate) async fn fork_thread_with_path(
+        &mut self,
+        config: Config,
+        thread_id: ThreadId,
+        path: Option<std::path::PathBuf>,
+    ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(&config);
         let response: ThreadForkResponse = self
@@ -496,6 +517,7 @@ impl AppServerSession {
                 params: thread_fork_params_from_config(
                     session_config,
                     thread_id,
+                    path,
                     self.thread_params_mode(),
                     self.remote_cwd_override.as_deref(),
                 ),
@@ -1404,6 +1426,7 @@ fn thread_start_params_from_config(
 fn thread_resume_params_from_config(
     config: Config,
     thread_id: ThreadId,
+    path: Option<std::path::PathBuf>,
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
 ) -> ThreadResumeParams {
@@ -1419,6 +1442,7 @@ fn thread_resume_params_from_config(
         .flatten();
     ThreadResumeParams {
         thread_id: thread_id.to_string(),
+        path,
         model: config.model.clone(),
         model_provider: thread_params_mode.model_provider_from_config(&config),
         service_tier: service_tier_override_from_config(&config),
@@ -1439,6 +1463,7 @@ fn thread_resume_params_from_config(
 fn thread_fork_params_from_config(
     config: Config,
     thread_id: ThreadId,
+    path: Option<std::path::PathBuf>,
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
 ) -> ThreadForkParams {
@@ -1454,6 +1479,7 @@ fn thread_fork_params_from_config(
         .flatten();
     ThreadForkParams {
         thread_id: thread_id.to_string(),
+        path,
         model: config.model.clone(),
         model_provider: thread_params_mode.model_provider_from_config(&config),
         service_tier: service_tier_override_from_config(&config),
@@ -1989,12 +2015,14 @@ mod tests {
         let resume = thread_resume_params_from_config(
             config.clone(),
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
         );
         let fork = thread_fork_params_from_config(
             config,
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
         );
@@ -2106,12 +2134,14 @@ mod tests {
         let resume = thread_resume_params_from_config(
             config.clone(),
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
         );
         let fork = thread_fork_params_from_config(
             config,
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
         );
@@ -2133,7 +2163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_lifecycle_params_forward_config_overrides_and_service_tier() {
+    async fn thread_lifecycle_params_forward_config_overrides_service_tier_and_paths() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&temp_dir).await;
         config.model_reasoning_effort = Some(ReasoningEffort::High);
@@ -2147,6 +2177,7 @@ mod tests {
         config.bypass_hook_trust = true;
         config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
         let thread_id = ThreadId::new();
+        let rollout_path = temp_dir.path().join("rollout.jsonl");
 
         let start = thread_start_params_from_config(
             &config,
@@ -2157,12 +2188,14 @@ mod tests {
         let resume = thread_resume_params_from_config(
             config.clone(),
             thread_id,
+            Some(rollout_path.clone()),
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
         );
         let fork = thread_fork_params_from_config(
             config,
             thread_id,
+            Some(rollout_path.clone()),
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
         );
@@ -2171,6 +2204,8 @@ mod tests {
         assert_eq!(start.service_tier, expected_service_tier);
         assert_eq!(resume.service_tier, expected_service_tier);
         assert_eq!(fork.service_tier, expected_service_tier);
+        assert_eq!(resume.path.as_deref(), Some(rollout_path.as_path()));
+        assert_eq!(fork.path.as_deref(), Some(rollout_path.as_path()));
         let string = |value: &str| serde_json::Value::String(value.to_string());
         let expected_config = HashMap::from([
             ("model_reasoning_effort".to_string(), string("high")),
@@ -2217,6 +2252,7 @@ mod tests {
         let params = thread_fork_params_from_config(
             config,
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
         );
@@ -2244,12 +2280,14 @@ mod tests {
         let control_resume = thread_resume_params_from_config(
             config.clone(),
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
         );
         let control_fork = thread_fork_params_from_config(
             config.clone(),
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
         );
@@ -2273,12 +2311,14 @@ mod tests {
         let treatment_resume = thread_resume_params_from_config(
             config.clone(),
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
         );
         let treatment_fork = thread_fork_params_from_config(
             config,
             thread_id,
+            /*path*/ None,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
         );
