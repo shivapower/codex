@@ -9,6 +9,7 @@ use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AppsConfig;
 use codex_app_server_protocol::AppsDefaultConfig;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::AuthCredentialsStoreMode;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigEdit;
 use codex_app_server_protocol::ConfigLayerSource;
@@ -76,6 +77,48 @@ async fn config_requirements_read_includes_allow_remote_control() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_write_reports_managed_requirement_as_read_only() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_config(&codex_home, "")?;
+    std::fs::write(
+        codex_home.path().join("requirements.toml"),
+        r#"chatgpt_base_url = "https://managed.example""#,
+    )?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_config_value_write_request(ConfigValueWriteParams {
+            file_path: None,
+            key_path: "chatgpt_base_url".to_string(),
+            value: json!("https://user.example"),
+            merge_strategy: MergeStrategy::Replace,
+            expected_version: None,
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(
+        error
+            .error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("config_write_error_code"))
+            .and_then(serde_json::Value::as_str),
+        Some("configRequirementReadonly")
+    );
+    assert_eq!(
+        std::fs::read_to_string(codex_home.path().join("config.toml"))?,
+        ""
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_read_returns_effective_and_layers() -> Result<()> {
     let codex_home = TempDir::new()?;
     write_config(
@@ -83,6 +126,7 @@ async fn config_read_returns_effective_and_layers() -> Result<()> {
         r#"
 model = "gpt-user"
 sandbox_mode = "workspace-write"
+cli_auth_credentials_store = "keyring"
 "#,
     )?;
     let codex_home_path = codex_home.path().canonicalize()?;
@@ -109,6 +153,10 @@ sandbox_mode = "workspace-write"
     } = to_response(resp)?;
 
     assert_eq!(config.model.as_deref(), Some("gpt-user"));
+    assert_eq!(
+        config.cli_auth_credentials_store,
+        Some(AuthCredentialsStoreMode::Keyring)
+    );
     assert_eq!(
         origins.get("model").expect("origin").name,
         ConfigLayerSource::User {
