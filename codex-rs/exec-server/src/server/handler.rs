@@ -1,10 +1,10 @@
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
+use codex_utils_home_dir::find_codex_home;
 use serde_json::to_value;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
@@ -55,7 +55,7 @@ use crate::server::session_registry::SessionRegistry;
 pub(crate) struct ExecServerHandler {
     session_registry: Arc<SessionRegistry>,
     notifications: RpcNotificationSender,
-    session: StdMutex<Option<SessionHandle>>,
+    session: std::sync::Mutex<Option<SessionHandle>>,
     active_body_stream_ids: Mutex<HashSet<String>>,
     background_task_shutdown: CancellationToken,
     background_tasks: TaskTracker,
@@ -73,7 +73,7 @@ impl ExecServerHandler {
         Self {
             session_registry,
             notifications,
-            session: StdMutex::new(None),
+            session: std::sync::Mutex::new(None),
             active_body_stream_ids: Mutex::new(HashSet::new()),
             background_task_shutdown: CancellationToken::new(),
             background_tasks: TaskTracker::new(),
@@ -128,7 +128,11 @@ impl ExecServerHandler {
             .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
-        Ok(InitializeResponse { session_id })
+        Ok(InitializeResponse {
+            session_id,
+            codex_home: find_codex_home()
+                .map_err(|err| internal_error(format!("failed to locate Codex home: {err}")))?,
+        })
     }
 
     pub(crate) fn initialized(&self) -> Result<(), String> {

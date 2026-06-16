@@ -33,6 +33,7 @@ use crate::request_processors::McpRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
+use crate::request_processors::RuntimeInstallRequestProcessor;
 use crate::request_processors::SearchRequestProcessor;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
@@ -198,6 +199,7 @@ pub(crate) struct MessageProcessor {
     mcp_processor: McpRequestProcessor,
     plugin_processor: PluginRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
+    runtime_install_processor: RuntimeInstallRequestProcessor,
     search_processor: SearchRequestProcessor,
     thread_goal_processor: ThreadGoalRequestProcessor,
     thread_processor: ThreadRequestProcessor,
@@ -453,6 +455,11 @@ impl MessageProcessor {
             workspace_settings_cache,
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
+        let runtime_install_processor = RuntimeInstallRequestProcessor::new(
+            Arc::clone(&environment_manager_for_requests),
+            outgoing.clone(),
+            Arc::clone(&thread_manager),
+        );
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -551,6 +558,7 @@ impl MessageProcessor {
             mcp_processor,
             plugin_processor,
             remote_control_processor,
+            runtime_install_processor,
             search_processor,
             thread_goal_processor,
             thread_processor,
@@ -1056,6 +1064,16 @@ impl MessageProcessor {
                 .model_provider_capabilities_read()
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::RuntimeInstall { params, .. } => {
+                self.runtime_install_processor
+                    .install_runtime(connection_id, params)
+                    .await
+            }
+            ClientRequest::RuntimeInstallCancel { .. } => {
+                self.runtime_install_processor
+                    .cancel_runtime_install()
+                    .await
+            }
             ClientRequest::ThreadStart { params, .. } => {
                 self.thread_processor
                     .thread_start(

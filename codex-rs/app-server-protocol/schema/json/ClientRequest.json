@@ -3172,6 +3172,61 @@
         }
       ]
     },
+    "RuntimeInstallManifestParams": {
+      "properties": {
+        "archiveName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archiveSha256": {
+          "type": "string"
+        },
+        "archiveSizeBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "archiveUrl": {
+          "type": "string"
+        },
+        "bundleFormatVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "bundleVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeRootDirectoryName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "archiveSha256",
+        "archiveUrl"
+      ],
+      "type": "object"
+    },
     "SandboxMode": {
       "enum": [
         "read-only",

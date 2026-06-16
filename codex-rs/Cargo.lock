@@ -2005,6 +2005,7 @@ dependencies = [
  "codex-protocol",
  "codex-rmcp-client",
  "codex-rollout",
+ "codex-runtime-install",
  "codex-sandboxing",
  "codex-shell-command",
  "codex-skills-extension",
@@ -2885,6 +2886,7 @@ dependencies = [
  "codex-shell-command",
  "codex-test-binary-support",
  "codex-utils-absolute-path",
+ "codex-utils-home-dir",
  "codex-utils-path-uri",
  "codex-utils-pty",
  "codex-utils-rustls-provider",
@@ -3776,6 +3778,26 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "codex-runtime-install"
+version = "0.0.0"
+dependencies = [
+ "codex-app-server-protocol",
+ "codex-exec-server",
+ "codex-protocol",
+ "codex-utils-absolute-path",
+ "codex-utils-path-uri",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
