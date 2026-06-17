@@ -11,7 +11,8 @@ use crate::Cli;
 use crate::app_server_session::AppServerSession;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
-use crate::legacy_core::config::load_config_toml_with_layer_stack;
+use crate::legacy_core::config::bootstrap_auth_config;
+use crate::legacy_core::config::load_bootstrap_config_toml_with_layer_stack;
 use crate::legacy_core::config::resolve_bootstrap_auth_keyring_backend_kind;
 use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
@@ -25,6 +26,7 @@ use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
+use codex_login::enforce_login_restrictions;
 use codex_protocol::ThreadId;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_home_dir::find_codex_home;
@@ -312,7 +314,7 @@ async fn start_app_server_for_archive_command(
         loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
 
-    let bootstrap_config = load_config_toml_with_layer_stack(
+    let bootstrap_config = load_bootstrap_config_toml_with_layer_stack(
         codex_home.as_path(),
         config_cwd.as_ref(),
         cli_kv_overrides.clone(),
@@ -324,6 +326,11 @@ async fn start_app_server_for_archive_command(
     )
     .await
     .wrap_err("failed to load config.toml")?;
+    enforce_login_restrictions(&bootstrap_auth_config(
+        codex_home.as_path(),
+        &bootstrap_config,
+    )?)
+    .await?;
     let config_toml = &bootstrap_config.config_toml;
     let chatgpt_base_url = config_toml
         .chatgpt_base_url

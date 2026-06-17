@@ -63,8 +63,9 @@ use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigTomlLoadResult;
+use codex_core::config::bootstrap_auth_config;
 use codex_core::config::find_codex_home;
-use codex_core::config::load_config_toml_with_layer_stack;
+use codex_core::config::load_bootstrap_config_toml_with_layer_stack;
 use codex_core::config::resolve_bootstrap_auth_keyring_backend_kind;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config::resolve_profile_v2_config_path;
@@ -344,6 +345,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
+    enforce_login_restrictions(&bootstrap_auth_config(&codex_home, &bootstrap_config)?).await?;
 
     let chatgpt_base_url = bootstrap_config_toml
         .chatgpt_base_url
@@ -623,7 +625,7 @@ async fn load_bootstrap_config_or_exit(
     strict_config: bool,
     cloud_config_bundle: CloudConfigBundleLoader,
 ) -> ConfigTomlLoadResult {
-    match load_config_toml_with_layer_stack(
+    match load_bootstrap_config_toml_with_layer_stack(
         codex_home,
         cwd,
         cli_kv_overrides,
