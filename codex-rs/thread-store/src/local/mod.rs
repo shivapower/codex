@@ -6,6 +6,7 @@ mod list_threads;
 mod live_writer;
 mod read_thread;
 mod search_threads;
+mod thread_artifacts;
 mod unarchive_thread;
 mod update_thread_metadata;
 
@@ -23,8 +24,10 @@ use tokio::sync::Mutex;
 
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
+use crate::CreateThreadArtifactParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
+use crate::ListThreadArtifactsParams;
 use crate::ListThreadsParams;
 use crate::LoadThreadHistoryParams;
 use crate::ReadThreadByRolloutPathParams;
@@ -32,6 +35,7 @@ use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::SearchThreadsParams;
 use crate::StoredThread;
+use crate::StoredThreadArtifact;
 use crate::StoredThreadHistory;
 use crate::ThreadPage;
 use crate::ThreadSearchPage;
@@ -279,6 +283,20 @@ impl ThreadStore for LocalThreadStore {
 
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
         Box::pin(async move { list_threads::list_threads(self, params).await })
+    }
+
+    fn list_thread_artifacts(
+        &self,
+        params: ListThreadArtifactsParams,
+    ) -> ThreadStoreFuture<'_, Vec<StoredThreadArtifact>> {
+        Box::pin(async move { thread_artifacts::list_thread_artifacts(self, params).await })
+    }
+
+    fn create_thread_artifact(
+        &self,
+        params: CreateThreadArtifactParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadArtifact> {
+        Box::pin(async move { thread_artifacts::create_thread_artifact(self, params).await })
     }
 
     fn search_threads(

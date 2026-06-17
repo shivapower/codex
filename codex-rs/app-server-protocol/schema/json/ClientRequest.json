@@ -3490,6 +3490,34 @@
       ],
       "type": "object"
     },
+    "ThreadArtifactCreateParams": {
+      "properties": {
+        "artifact": {
+          "$ref": "#/definitions/ThreadArtifactWriteParams"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadArtifactWriteParams": {
+      "properties": {
+        "artifactType": {
+          "type": "string"
+        },
+        "payload": true
+      },
+      "required": [
+        "artifactType",
+        "payload"
+      ],
+      "type": "object"
+    },
     "ThreadCompactStartParams": {
       "properties": {
         "threadId": {
@@ -4989,6 +5017,30 @@
         "params"
       ],
       "title": "Thread/metadata/updateRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/artifact/create"
+          ],
+          "title": "Thread/artifact/createRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadArtifactCreateParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/artifact/createRequest",
       "type": "object"
     },
     {

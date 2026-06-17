@@ -553,6 +553,7 @@ mod tests {
                 ..Default::default()
             },
             git: None,
+            artifacts: std::collections::HashMap::new(),
         }
     }
 

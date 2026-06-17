@@ -17,14 +17,17 @@ use codex_rollout::persisted_rollout_items;
 
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
+use crate::CreateThreadArtifactParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
+use crate::ListThreadArtifactsParams;
 use crate::ListThreadsParams;
 use crate::LoadThreadHistoryParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::StoredThread;
+use crate::StoredThreadArtifact;
 use crate::StoredThreadHistory;
 use crate::ThreadMetadataPatch;
 use crate::ThreadPage;
@@ -180,6 +183,8 @@ pub struct InMemoryThreadStoreCalls {
     pub read_thread_with_history: usize,
     pub read_thread_by_rollout_path: usize,
     pub list_threads: usize,
+    pub list_thread_artifacts: usize,
+    pub create_thread_artifact: usize,
     pub update_thread_metadata: usize,
     pub archive_thread: usize,
     pub unarchive_thread: usize,
@@ -203,6 +208,7 @@ struct InMemoryThreadStoreState {
     histories: HashMap<ThreadId, Vec<RolloutItem>>,
     metadata_updates: HashMap<ThreadId, ThreadMetadataPatch>,
     names: HashMap<ThreadId, Option<String>>,
+    artifacts: HashMap<ThreadId, Vec<StoredThreadArtifact>>,
     rollout_paths: HashMap<PathBuf, ThreadId>,
 }
 
@@ -255,6 +261,7 @@ impl InMemoryThreadStore {
             .push(RolloutItem::SessionMeta(SessionMetaLine {
                 meta: session_meta,
                 git: None,
+                artifacts: HashMap::new(),
             }));
         state.created_threads.insert(params.thread_id, params);
         Ok(())
@@ -347,6 +354,36 @@ impl InMemoryThreadStore {
             items,
             next_cursor: None,
         })
+    }
+
+    async fn list_thread_artifacts(
+        &self,
+        params: ListThreadArtifactsParams,
+    ) -> ThreadStoreResult<Vec<StoredThreadArtifact>> {
+        let mut state = self.state.lock().await;
+        state.calls.list_thread_artifacts += 1;
+        Ok(state
+            .artifacts
+            .get(&params.thread_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn create_thread_artifact(
+        &self,
+        params: CreateThreadArtifactParams,
+    ) -> ThreadStoreResult<StoredThreadArtifact> {
+        let mut state = self.state.lock().await;
+        state.calls.create_thread_artifact += 1;
+        if !state.created_threads.contains_key(&params.thread_id) {
+            return Err(ThreadStoreError::ThreadNotFound {
+                thread_id: params.thread_id,
+            });
+        }
+        let artifacts = state.artifacts.entry(params.thread_id).or_default();
+        let artifact = stored_artifact_from_new(params.artifact, uuid::Uuid::now_v7().to_string());
+        artifacts.push(artifact.clone());
+        Ok(artifact)
     }
 
     async fn update_thread_metadata(
@@ -462,6 +499,20 @@ impl ThreadStore for InMemoryThreadStore {
         })
     }
 
+    fn list_thread_artifacts(
+        &self,
+        params: ListThreadArtifactsParams,
+    ) -> ThreadStoreFuture<'_, Vec<StoredThreadArtifact>> {
+        Box::pin(InMemoryThreadStore::list_thread_artifacts(self, params))
+    }
+
+    fn create_thread_artifact(
+        &self,
+        params: CreateThreadArtifactParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadArtifact> {
+        Box::pin(InMemoryThreadStore::create_thread_artifact(self, params))
+    }
+
     fn update_thread_metadata(
         &self,
         params: UpdateThreadMetadataParams,
@@ -552,6 +603,7 @@ fn stored_thread_from_state(
         agent_role: metadata.and_then(|metadata| metadata.agent_role.clone().flatten()),
         agent_path: metadata.and_then(|metadata| metadata.agent_path.clone().flatten()),
         git_info: metadata.and_then(git_info_from_patch),
+        artifacts: state.artifacts.get(&thread_id).cloned().unwrap_or_default(),
         approval_mode: metadata
             .and_then(|metadata| metadata.approval_mode)
             .unwrap_or(AskForApproval::Never),
@@ -562,6 +614,18 @@ fn stored_thread_from_state(
         first_user_message: metadata.and_then(|metadata| metadata.first_user_message.clone()),
         history,
     })
+}
+
+fn stored_artifact_from_new(
+    artifact: crate::NewThreadArtifact,
+    id: String,
+) -> StoredThreadArtifact {
+    StoredThreadArtifact {
+        id,
+        created_at: Utc::now().timestamp(),
+        artifact_type: artifact.artifact_type,
+        payload: artifact.payload,
+    }
 }
 
 fn git_info_from_patch(patch: &ThreadMetadataPatch) -> Option<codex_protocol::protocol::GitInfo> {

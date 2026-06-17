@@ -194,7 +194,8 @@ SELECT
     threads.archived_at,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.artifacts_json
 FROM threads
             "#,
         );

@@ -375,6 +375,7 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                     multi_agent_version: None,
                 },
                 git: None,
+                artifacts: std::collections::HashMap::new(),
             };
 
             let lines = [

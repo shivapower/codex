@@ -1,5 +1,6 @@
 //! Persist Codex session rollouts (.jsonl) so sessions can be replayed or inspected later.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
@@ -1625,6 +1626,7 @@ async fn write_session_meta(
     let session_meta_line = SessionMetaLine {
         meta: session_meta,
         git: git_info,
+        artifacts: HashMap::new(),
     };
 
     let rollout_item = RolloutItem::SessionMeta(session_meta_line);

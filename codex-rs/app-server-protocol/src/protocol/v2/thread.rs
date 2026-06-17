@@ -4,6 +4,7 @@ use super::AskForApproval;
 use super::SandboxMode;
 use super::SandboxPolicy;
 use super::Thread;
+use super::ThreadArtifact;
 use super::ThreadItem;
 use super::ThreadSource;
 use super::Turn;
@@ -802,6 +803,29 @@ pub struct ThreadMetadataUpdateResponse {
     pub thread: Thread,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadArtifactWriteParams {
+    pub artifact_type: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadArtifactCreateParams {
+    pub thread_id: String,
+    pub artifact: ThreadArtifactWriteParams,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadArtifactCreateResponse {
+    pub artifact: ThreadArtifact,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(rename_all = "lowercase")]
@@ -1393,6 +1417,14 @@ pub struct ThreadGoalUpdatedNotification {
     pub thread_id: String,
     pub turn_id: Option<String>,
     pub goal: ThreadGoal,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadArtifactsUpdatedNotification {
+    pub thread_id: String,
+    pub artifacts: Vec<ThreadArtifact>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

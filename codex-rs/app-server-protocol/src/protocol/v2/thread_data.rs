@@ -129,6 +129,17 @@ pub struct GitInfo {
     pub origin_url: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadArtifact {
+    pub id: String,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    pub artifact_type: String,
+    pub payload: serde_json::Value,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -170,6 +181,9 @@ pub struct Thread {
     pub agent_role: Option<String>,
     /// Optional Git metadata captured when the thread was created.
     pub git_info: Option<GitInfo>,
+    /// Model-managed artifacts associated with the thread.
+    #[serde(default)]
+    pub artifacts: Vec<ThreadArtifact>,
     /// Optional user-facing thread title.
     pub name: Option<String>,
     /// Only populated on `thread/resume`, `thread/rollback`, `thread/fork`, and `thread/read`

@@ -62,6 +62,7 @@ async fn write_rollout_with_user_event(dir: &Path, thread_id: ThreadId) -> io::R
             multi_agent_version: None,
         },
         git: None,
+        artifacts: std::collections::HashMap::new(),
     };
     let meta_line = RolloutLine {
         timestamp: TEST_TIMESTAMP.to_string(),

@@ -550,6 +550,11 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadMetadataUpdateResponse,
     },
+    ThreadArtifactCreate => "thread/artifact/create" {
+        params: v2::ThreadArtifactCreateParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadArtifactCreateResponse,
+    },
     #[experimental("thread/settings/update")]
     ThreadSettingsUpdate => "thread/settings/update" {
         params: v2::ThreadSettingsUpdateParams,
@@ -1579,6 +1584,8 @@ server_notification_definitions! {
     SkillsChanged => "skills/changed" (v2::SkillsChangedNotification),
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
+    ThreadArtifactsUpdated => "thread/artifacts/updated" (v2::ThreadArtifactsUpdatedNotification),
+    #[experimental("thread/goal/cleared")]
     ThreadGoalCleared => "thread/goal/cleared" (v2::ThreadGoalClearedNotification),
     #[experimental("thread/settings/updated")]
     ThreadSettingsUpdated => "thread/settings/updated" (v2::ThreadSettingsUpdatedNotification),
@@ -2510,6 +2517,7 @@ mod tests {
                     agent_nickname: None,
                     agent_role: None,
                     git_info: None,
+                    artifacts: Vec::new(),
                     name: None,
                     turns: Vec::new(),
                 },
