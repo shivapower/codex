@@ -75,6 +75,7 @@ use codex_analytics::build_track_events_context;
 use codex_async_utils::OrCancelExt;
 use codex_core_plugins::RecommendedPluginCandidatesInput;
 use codex_core_skills::injection::InjectedHostSkillPrompts;
+use codex_extension_api::SamplingInputContext;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
@@ -1076,8 +1077,37 @@ async fn run_sampling_request(
     let mut retries = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
+    let sampling_input_contributors = sess
+        .services
+        .extensions
+        .sampling_input_contributors()
+        .to_vec();
     loop {
-        let prompt_input = if let Some(input) = initial_input.take() {
+        let prompt_input = if let Some(mut input) = initial_input.take() {
+            let mut contributed_items = Vec::new();
+            for contributor in &sampling_input_contributors {
+                contributed_items.extend(
+                    contributor
+                        .contribute(SamplingInputContext {
+                            turn_id: &turn_context.sub_id,
+                            session_store: &sess.services.session_extension_data,
+                            thread_store: &sess.services.thread_extension_data,
+                            turn_store: turn_store.as_ref(),
+                        })
+                        .or_cancel(&cancellation_token)
+                        .await?
+                        .map_err(|err| {
+                            CodexErr::Fatal(format!("sampling input contributor failed: {err}"))
+                        })?
+                        .into_iter()
+                        .map(ContextualUserFragment::into_boxed_response_item),
+                );
+            }
+            if !contributed_items.is_empty() {
+                sess.record_conversation_items(&turn_context, &contributed_items)
+                    .await;
+                input.extend(contributed_items);
+            }
             input
         } else {
             sess.clone_history()
