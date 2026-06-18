@@ -56,17 +56,12 @@ impl ThreadEnvironments {
     }
 
     pub(crate) fn update_selections(&self, environments: &[TurnEnvironmentSelection]) {
-        let previous = self
-            .snapshot_task
-            .load()
-            .peek()
-            .cloned()
-            .unwrap_or_default();
+        let previous = self.snapshot_if_ready().unwrap_or_default();
         let environment_manager = Arc::clone(&self.environment_manager);
         let local_shell = self.local_shell.clone();
         let shell_snapshot = self.shell_snapshot.clone();
         let environments = environments.to_vec();
-        let (snapshot_task, snapshot) = async move {
+        let snapshot_task = async move {
             Self::resolve_snapshot(
                 environment_manager,
                 local_shell,
@@ -76,9 +71,10 @@ impl ThreadEnvironments {
             )
             .await
         }
-        .remote_handle();
-        self.snapshot_task
-            .store(Arc::new(snapshot.boxed().shared()));
+        .boxed()
+        .shared();
+        self.snapshot_task.store(Arc::new(snapshot_task.clone()));
+        // Keep resolving even when no caller is currently waiting for the result.
         drop(tokio::spawn(snapshot_task));
     }
 
@@ -168,6 +164,10 @@ impl ThreadEnvironments {
         drop(tokio::spawn(task.clone()));
         turn_environment.shell_snapshot = task;
         Ok(turn_environment)
+    }
+
+    pub(crate) fn snapshot_if_ready(&self) -> Option<TurnEnvironmentSnapshot> {
+        self.snapshot_task.load().peek().cloned()
     }
 
     pub(crate) async fn snapshot(&self) -> TurnEnvironmentSnapshot {
@@ -354,6 +354,35 @@ url = "ws://127.0.0.1:8765"
                 .and_then(|environment| environment.shell.as_ref()),
             Some(&local_shell)
         );
+    }
+
+    #[tokio::test]
+    async fn environment_resolution_runs_in_background() {
+        let cwd = AbsolutePathBuf::current_dir().expect("cwd");
+        let selection = TurnEnvironmentSelection {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            cwd: PathUri::from_abs_path(&cwd),
+        };
+        let turn_environments = ThreadEnvironments::new(
+            Arc::new(EnvironmentManager::default_for_tests()),
+            crate::shell::default_user_shell(),
+            ShellSnapshot::disabled(),
+            TurnEnvironmentSnapshot::default(),
+        );
+
+        turn_environments.update_selections(std::slice::from_ref(&selection));
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(snapshot) = turn_environments.snapshot_if_ready() {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("environment resolution should complete in the background");
+
+        assert_eq!(snapshot.to_selections(), vec![selection]);
     }
 
     #[tokio::test]
