@@ -54,6 +54,8 @@ pub struct ReadDirectoryEntry {
     pub file_name: String,
     pub is_directory: bool,
     pub is_file: bool,
+    /// `None` when the backing filesystem cannot report symlink identity.
+    pub is_symlink: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
