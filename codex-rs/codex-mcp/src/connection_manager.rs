@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
@@ -19,6 +20,12 @@ use crate::codex_apps::CodexAppsToolsCacheKey;
 use crate::codex_apps::write_cached_codex_apps_tools_if_needed;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationReviewerHandle;
+use crate::file_transfer::AuthorizeDownloadResult;
+use crate::file_transfer::AuthorizeUploadParams;
+use crate::file_transfer::AuthorizeUploadResult;
+use crate::file_transfer::FileUriParams;
+use crate::file_transfer::METHOD_FILES_AUTHORIZE_DOWNLOAD;
+use crate::file_transfer::METHOD_FILES_AUTHORIZE_UPLOAD;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginProvenance;
 use crate::rmcp_client::AsyncManagedClient;
@@ -65,6 +72,9 @@ use rmcp::model::ReadResourceResult;
 use rmcp::model::RequestId;
 use rmcp::model::Resource;
 use rmcp::model::ResourceTemplate;
+use rmcp::model::ServerResult;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -111,6 +121,7 @@ pub struct McpConnectionManager {
     tool_plugin_provenance: Arc<ToolPluginProvenance>,
     host_owned_codex_apps_enabled: bool,
     prefix_mcp_tool_names: bool,
+    mcp_file_transfer_enabled: AtomicBool,
     elicitation_requests: ElicitationRequestManager,
     startup_cancellation_token: CancellationToken,
 }
@@ -252,6 +263,7 @@ impl McpConnectionManager {
             tool_plugin_provenance,
             host_owned_codex_apps_enabled,
             prefix_mcp_tool_names,
+            mcp_file_transfer_enabled: AtomicBool::new(false),
             elicitation_requests: elicitation_requests.clone(),
             startup_cancellation_token: startup_cancellation_token.clone(),
         };
@@ -338,6 +350,7 @@ impl McpConnectionManager {
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             host_owned_codex_apps_enabled: false,
             prefix_mcp_tool_names,
+            mcp_file_transfer_enabled: AtomicBool::new(false),
             elicitation_requests: ElicitationRequestManager::new(
                 approval_policy.value(),
                 permission_profile.clone(),
@@ -349,6 +362,11 @@ impl McpConnectionManager {
 
     pub fn has_servers(&self) -> bool {
         !self.clients.is_empty()
+    }
+
+    pub fn set_mcp_file_transfer_enabled(&self, enabled: bool) {
+        self.mcp_file_transfer_enabled
+            .store(enabled, Ordering::Relaxed);
     }
 
     pub(crate) fn contains_server(&self, server_name: &str) -> bool {
@@ -475,13 +493,26 @@ impl McpConnectionManager {
                 tool_count = server_tools.len(),
                 "listed MCP server tools while building tool list"
             );
-            tools.extend(
-                server_tools
-                    .into_iter()
-                    .map(|tool| self.with_server_metadata(tool)),
-            );
+            tools.extend(server_tools.into_iter().map(|mut tool| {
+                tool.tool = tool_with_model_visible_input_schema(
+                    &tool.tool,
+                    tool.server_name == CODEX_APPS_MCP_SERVER_NAME,
+                    self.mcp_file_transfer_enabled.load(Ordering::Relaxed),
+                );
+                self.with_server_metadata(tool)
+            }));
         }
         normalize_tools_for_model_with_prefix(tools, self.prefix_mcp_tool_names)
+    }
+
+    /// Returns an unshaped tool definition for execution-time metadata lookup.
+    pub async fn tool_info_for_execution(&self, server: &str, tool_name: &str) -> Option<ToolInfo> {
+        self.clients
+            .get(server)?
+            .listed_tools()
+            .await?
+            .into_iter()
+            .find(|tool| tool.server_name == server && tool.tool.name == tool_name)
     }
 
     /// Force-refresh codex apps tools by bypassing the in-process cache.
@@ -530,7 +561,11 @@ impl McpConnectionManager {
         let tools = filter_tools(tools, &managed_client.tool_filter)
             .into_iter()
             .map(|mut tool| {
-                tool.tool = tool_with_model_visible_input_schema(&tool.tool);
+                tool.tool = tool_with_model_visible_input_schema(
+                    &tool.tool,
+                    /*honor_openai_file_params*/ true,
+                    self.mcp_file_transfer_enabled.load(Ordering::Relaxed),
+                );
                 self.with_server_metadata(tool)
             });
         Ok(normalize_tools_for_model_with_prefix(
@@ -709,6 +744,58 @@ impl McpConnectionManager {
             is_error: result.is_error,
             meta: result.meta.and_then(|meta| serde_json::to_value(meta).ok()),
         })
+    }
+
+    pub async fn authorize_file_upload(
+        &self,
+        server: &str,
+        params: AuthorizeUploadParams,
+    ) -> Result<AuthorizeUploadResult> {
+        self.send_file_request(server, METHOD_FILES_AUTHORIZE_UPLOAD, params)
+            .await
+    }
+
+    pub async fn authorize_file_download(
+        &self,
+        server: &str,
+        uri: String,
+    ) -> Result<AuthorizeDownloadResult> {
+        if !self.mcp_file_transfer_enabled.load(Ordering::Relaxed) {
+            return Err(anyhow!("MCP file transfer is disabled"));
+        }
+        // SEP-2631 defines `capabilities.files` on the client. A file URI
+        // returned by the server is sufficient evidence to try the download
+        // authorization method without a separate server capability gate.
+        self.send_file_request(
+            server,
+            METHOD_FILES_AUTHORIZE_DOWNLOAD,
+            FileUriParams { uri },
+        )
+        .await
+    }
+
+    async fn send_file_request<T, P>(&self, server: &str, method: &str, params: P) -> Result<T>
+    where
+        T: DeserializeOwned,
+        P: Serialize,
+    {
+        if !self.mcp_file_transfer_enabled.load(Ordering::Relaxed) {
+            return Err(anyhow!("MCP file transfer is disabled"));
+        }
+        let client = self.client_by_name(server).await?;
+        let params = serde_json::to_value(params).context("failed to serialize file request")?;
+        let result = client
+            .client
+            .send_custom_request_with_timeout(method, Some(params), client.tool_timeout)
+            .await
+            .with_context(|| format!("MCP file request `{method}` failed for `{server}`"))?;
+        let ServerResult::CustomResult(result) = result else {
+            return Err(anyhow!(
+                "MCP file request `{method}` returned an unexpected response"
+            ));
+        };
+        serde_json::from_value(result.0)
+            .with_context(|| format!("MCP file request `{method}` returned an invalid result"))
     }
 
     pub async fn server_supports_sandbox_state_meta_capability(
