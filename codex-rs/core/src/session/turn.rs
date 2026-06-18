@@ -39,6 +39,13 @@ use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
+use crate::runtime_tool_catalog::CuratedPluginCatalogFragment;
+use crate::runtime_tool_catalog::HostedConnectorRuntimeFragment;
+use crate::runtime_tool_catalog::HostedConnectorsRevision;
+use crate::runtime_tool_catalog::RemoteCuratedPluginCatalogFragment;
+use crate::runtime_tool_catalog::RevisionedPluginCatalogFragment;
+use crate::runtime_tool_catalog::RevisionedPluginsRevision;
+use crate::runtime_tool_catalog::RuntimeToolCatalogSnapshot;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -74,6 +81,7 @@ use codex_analytics::TurnResolvedConfigFact;
 use codex_analytics::build_track_events_context;
 use codex_async_utils::OrCancelExt;
 use codex_core_plugins::RecommendedPluginCandidatesInput;
+use codex_core_plugins::ToolSuggestPluginCatalog;
 use codex_core_skills::injection::InjectedHostSkillPrompts;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputEnvironment;
@@ -1156,11 +1164,44 @@ pub(crate) async fn built_tools(
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Arc<ToolRouter>> {
     let mcp_connection_manager = sess.services.mcp_connection_manager.load_full();
+    let runtime_catalog_manager = &sess.services.runtime_tool_catalog_manager;
+    let base_catalog = runtime_catalog_manager.snapshot();
+    let hosted_connectors = if let Some(revision) = mcp_connection_manager
+        .hosted_connector_runtime_revision()
+        .map(HostedConnectorsRevision::from)
+    {
+        if let Some(fragment) = base_catalog.hosted_connectors_for(revision) {
+            Some(fragment)
+        } else {
+            mcp_connection_manager
+                .hosted_connector_tools_snapshot()
+                .or_cancel(cancellation_token)
+                .await?
+                .map(|snapshot| {
+                    let connectors =
+                        connectors::accessible_connectors_from_mcp_tools(&snapshot.tools);
+                    Arc::new(HostedConnectorRuntimeFragment {
+                        revision: snapshot.revision.into(),
+                        tools: snapshot.tools,
+                        connectors,
+                    })
+                })
+        }
+    } else {
+        None
+    };
     let has_mcp_servers = mcp_connection_manager.has_servers();
-    let all_mcp_tools = mcp_connection_manager
-        .list_all_tools()
-        .or_cancel(cancellation_token)
-        .await?;
+    let all_mcp_tools = if let Some(hosted_connectors) = hosted_connectors.as_ref() {
+        mcp_connection_manager
+            .list_all_tools_with_hosted_connector_tools(&hosted_connectors.tools)
+            .or_cancel(cancellation_token)
+            .await?
+    } else {
+        mcp_connection_manager
+            .list_all_tools()
+            .or_cancel(cancellation_token)
+            .await?
+    };
     let loaded_plugins = sess
         .services
         .plugins_manager
@@ -1169,8 +1210,12 @@ pub(crate) async fn built_tools(
         .await;
 
     let apps_enabled = turn_context.apps_enabled();
-    let accessible_connectors =
-        apps_enabled.then(|| connectors::accessible_connectors_from_mcp_tools(&all_mcp_tools));
+    let accessible_connectors = apps_enabled.then(|| {
+        hosted_connectors.as_ref().map_or_else(
+            || connectors::accessible_connectors_from_mcp_tools(&all_mcp_tools),
+            |fragment| fragment.connectors.clone(),
+        )
+    });
     let accessible_connectors_with_enabled_state =
         accessible_connectors.as_ref().map(|connectors| {
             connectors::with_app_enabled_state(connectors.clone(), &turn_context.config)
@@ -1196,8 +1241,8 @@ pub(crate) async fn built_tools(
     } else {
         None
     };
+    let plugins_config = turn_context.config.plugins_config_input();
     let endpoint_recommended_plugin_candidates = if tool_suggest_is_enabled {
-        let plugins_config = turn_context.config.plugins_config_input();
         sess.services
             .plugins_manager
             .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
@@ -1210,6 +1255,70 @@ pub(crate) async fn built_tools(
             .await
     } else {
         None
+    };
+    let mut reusable_fragment_build_failed = false;
+    let revisioned_plugins =
+        if tool_suggest_is_enabled && endpoint_recommended_plugin_candidates.is_none() {
+            match sess
+                .services
+                .plugins_manager
+                .revisioned_plugin_catalog_snapshots_for_config(&plugins_config, auth.as_ref())
+            {
+                Ok(snapshots) => {
+                    let curated = snapshots.curated.map(|snapshot| {
+                        let revision = RevisionedPluginsRevision::from(snapshot.revision());
+                        base_catalog
+                            .curated_plugins_for(revision)
+                            .unwrap_or_else(|| {
+                                Arc::new(CuratedPluginCatalogFragment {
+                                    revision,
+                                    marketplaces: snapshot.shared_marketplaces(),
+                                })
+                            })
+                    });
+                    let remote_curated = snapshots.remote_curated.map(|snapshot| {
+                        let revision = RevisionedPluginsRevision::from(snapshot.revision());
+                        base_catalog
+                            .remote_curated_plugins_for(revision)
+                            .unwrap_or_else(|| {
+                                Arc::new(RemoteCuratedPluginCatalogFragment {
+                                    revision,
+                                    plugins: snapshot.shared_plugins(),
+                                })
+                            })
+                    });
+                    if curated.is_none() && remote_curated.is_none() {
+                        None
+                    } else {
+                        Some(Arc::new(RevisionedPluginCatalogFragment {
+                            curated,
+                            remote_curated,
+                        }))
+                    }
+                }
+                Err(err) => {
+                    reusable_fragment_build_failed = true;
+                    warn!("failed to build revisioned plugin catalog fragment: {err:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    let plugin_catalog = match revisioned_plugins.as_deref() {
+        Some(RevisionedPluginCatalogFragment {
+            curated: Some(curated),
+            ..
+        }) => ToolSuggestPluginCatalog::Curated {
+            marketplaces: &curated.marketplaces,
+        },
+        Some(RevisionedPluginCatalogFragment {
+            remote_curated: Some(remote_curated),
+            ..
+        }) => ToolSuggestPluginCatalog::RemoteCurated {
+            plugins: remote_curated.plugins.as_slice(),
+        },
+        _ => ToolSuggestPluginCatalog::RebuildAll,
     };
     let tool_suggest_candidates =
         if let Some(recommended_plugin_candidates) = endpoint_recommended_plugin_candidates {
@@ -1234,6 +1343,7 @@ pub(crate) async fn built_tools(
                             auth.as_ref(),
                             accessible_connectors.as_slice(),
                             &loaded_plugin_app_connector_ids,
+                            plugin_catalog,
                         )
                         .await
                         .map(|discoverable_tools| {
@@ -1270,6 +1380,16 @@ pub(crate) async fn built_tools(
     );
     let mcp_tools = has_mcp_servers.then_some(mcp_tool_exposure.direct_tools);
     let deferred_mcp_tools = mcp_tool_exposure.deferred_tools;
+    let next_catalog = RuntimeToolCatalogSnapshot {
+        hosted_connectors,
+        revisioned_plugins,
+    };
+    let next_catalog = if reusable_fragment_build_failed {
+        Err(())
+    } else {
+        Ok(next_catalog)
+    };
+    let _ = runtime_catalog_manager.publish_if_current(&base_catalog, next_catalog);
     Ok(Arc::new(ToolRouter::from_turn_context(
         turn_context,
         ToolRouterParams {
