@@ -1,4 +1,9 @@
+use super::bedrock_auth::clear_user_model_provider_if_bedrock;
+use super::bedrock_auth::set_user_model_provider_to_bedrock;
+use super::bedrock_auth::user_model_provider_state;
 use super::*;
+use codex_login::AuthMode;
+use codex_model_provider::is_supported_amazon_bedrock_region;
 
 mod rate_limit_resets;
 
@@ -168,7 +173,7 @@ impl AccountRequestProcessor {
     fn current_account_updated_notification(&self) -> AccountUpdatedNotification {
         let auth = self.auth_manager.auth_cached();
         AccountUpdatedNotification {
-            auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
+            auth_mode: self.auth_manager.account_auth_mode_cached(),
             plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
         }
     }
@@ -259,6 +264,10 @@ impl AccountRequestProcessor {
                 )
                 .await;
             }
+            LoginAccountParams::AmazonBedrock { api_key, region } => {
+                self.login_amazon_bedrock_v2(request_id, api_key, region)
+                    .await;
+            }
         }
         Ok(())
     }
@@ -313,6 +322,62 @@ impl AccountRequestProcessor {
             .login_api_key_common(&params)
             .await
             .map(|()| LoginAccountResponse::ApiKey {});
+        let logged_in = result.is_ok();
+        self.outgoing.send_result(request_id, result).await;
+
+        if logged_in {
+            self.send_login_success_notifications(/*login_id*/ None)
+                .await;
+        }
+    }
+
+    async fn login_amazon_bedrock_v2(
+        &self,
+        request_id: ConnectionRequestId,
+        api_key: String,
+        region: String,
+    ) {
+        let result = async {
+            if self.auth_manager.is_external_chatgpt_auth_active() {
+                return Err(self.external_auth_active_error());
+            }
+            if matches!(
+                self.config.forced_login_method,
+                Some(ForcedLoginMethod::Chatgpt)
+            ) {
+                return Err(invalid_request(
+                    "Amazon Bedrock login is disabled. Use ChatGPT login instead.",
+                ));
+            }
+
+            let api_key = api_key.trim();
+            if api_key.is_empty() {
+                return Err(invalid_request("Amazon Bedrock API key must not be empty."));
+            }
+            let region = region.trim();
+            if !is_supported_amazon_bedrock_region(region) {
+                return Err(invalid_request(format!(
+                    "Amazon Bedrock Mantle does not support region `{region}`"
+                )));
+            }
+
+            {
+                let mut guard = self.active_login.lock().await;
+                if let Some(active) = guard.take() {
+                    drop(active);
+                }
+            }
+
+            self.auth_manager
+                .login_with_bedrock_api_key(api_key, region)
+                .await
+                .map_err(|err| {
+                    internal_error(format!("failed to save Amazon Bedrock auth: {err}"))
+                })?;
+            set_user_model_provider_to_bedrock(&self.config_manager).await?;
+            Ok(LoginAccountResponse::AmazonBedrock {})
+        }
+        .await;
         let logged_in = result.is_ok();
         self.outgoing.send_result(request_id, result).await;
 
@@ -690,13 +755,30 @@ impl AccountRequestProcessor {
         }
     }
 
-    async fn logout_common(&self) -> std::result::Result<Option<AuthMode>, JSONRPCErrorError> {
+    async fn logout_common(&self) -> Result<Option<AuthMode>, JSONRPCErrorError> {
         // Cancel any active login attempt.
         {
             let mut guard = self.active_login.lock().await;
             if let Some(active) = guard.take() {
                 drop(active);
             }
+        }
+
+        if self
+            .auth_manager
+            .has_stored_bedrock_api_key_auth()
+            .map_err(|err| internal_error(format!("failed to read stored auth: {err}")))?
+        {
+            let user_model_provider = user_model_provider_state(&self.config_manager).await?;
+            self.auth_manager
+                .logout()
+                .await
+                .map_err(|err| internal_error(format!("logout failed: {err}")))?;
+            clear_user_model_provider_if_bedrock(&self.config_manager, user_model_provider).await?;
+            return Ok(None);
+        }
+        if self.config.model_provider.is_amazon_bedrock() {
+            return Ok(None);
         }
 
         match self.auth_manager.logout_with_revoke().await {
