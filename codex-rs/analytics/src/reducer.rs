@@ -648,7 +648,14 @@ impl AnalyticsReducer {
         let turn_id = input.turn_id.clone();
         let thread_id = input.thread_id.clone();
         let num_input_images = input.num_input_images;
+        let connection_id = self
+            .threads
+            .get(thread_id.as_str())
+            .and_then(|thread| thread.connection_id);
         let turn_state = self.turns.entry(turn_id.clone()).or_default();
+        if turn_state.connection_id.is_none() {
+            turn_state.connection_id = connection_id;
+        }
         turn_state.thread_id = Some(thread_id);
         turn_state.num_input_images = Some(num_input_images);
         turn_state.resolved_config = Some(input);
@@ -2542,6 +2549,7 @@ fn codex_turn_event_params(
     let TurnResolvedConfigFact {
         turn_id: _resolved_turn_id,
         thread_id: _resolved_thread_id,
+        parent_turn_id,
         num_input_images: _resolved_num_input_images,
         submission_type,
         ephemeral,
@@ -2584,6 +2592,7 @@ fn codex_turn_event_params(
         initialization_mode: thread_metadata.initialization_mode,
         subagent_source: thread_metadata.subagent_source.clone(),
         parent_thread_id: thread_metadata.parent_thread_id.clone(),
+        parent_turn_id,
         model: Some(model),
         model_provider,
         sandbox_policy: Some(sandbox_policy_mode(

@@ -389,6 +389,7 @@ fn sample_turn_resolved_config(thread_id: &str, turn_id: &str) -> TurnResolvedCo
     TurnResolvedConfigFact {
         turn_id: turn_id.to_string(),
         thread_id: thread_id.to_string(),
+        parent_turn_id: None,
         num_input_images: 1,
         submission_type: None,
         ephemeral: false,
@@ -2923,6 +2924,92 @@ async fn subagent_events_use_inherited_connection_unless_turn_connection_is_expl
 }
 
 #[tokio::test]
+async fn subagent_turn_lifecycle_emits_parent_turn_id() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut events = Vec::new();
+
+    ingest_review_prerequisites(&mut reducer, &mut events).await;
+    reducer
+        .ingest(
+            AnalyticsFact::Custom(CustomAnalyticsFact::SubAgentThreadStarted(
+                SubAgentThreadStartedInput {
+                    session_id: "session-root".to_string(),
+                    thread_id: "thread-subagent".to_string(),
+                    parent_thread_id: Some("thread-1".to_string()),
+                    forked_from_thread_id: None,
+                    product_client_id: "codex-tui".to_string(),
+                    client_name: "codex-tui".to_string(),
+                    client_version: "1.0.0".to_string(),
+                    model: "gpt-5".to_string(),
+                    ephemeral: false,
+                    subagent_source: SubAgentSource::Review,
+                    created_at: 130,
+                },
+            )),
+            &mut events,
+        )
+        .await;
+    events.clear();
+
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(sample_turn_started_notification(
+                "thread-subagent",
+                "turn-subagent",
+            ))),
+            &mut events,
+        )
+        .await;
+    let mut resolved_config = sample_turn_resolved_config("thread-subagent", "turn-subagent");
+    resolved_config.parent_turn_id = Some("parent-turn-1".to_string());
+    reducer
+        .ingest(
+            AnalyticsFact::Custom(CustomAnalyticsFact::TurnResolvedConfig(Box::new(
+                resolved_config,
+            ))),
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Custom(CustomAnalyticsFact::TurnTokenUsage(Box::new(
+                sample_turn_token_usage_fact("thread-subagent", "turn-subagent"),
+            ))),
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Custom(CustomAnalyticsFact::TurnProfile(Box::new(
+                TurnProfileFact {
+                    turn_id: "turn-subagent".to_string(),
+                    profile: sample_turn_profile(),
+                },
+            ))),
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(sample_turn_completed_notification(
+                "thread-subagent",
+                "turn-subagent",
+                AppServerTurnStatus::Completed,
+                /*codex_error_info*/ None,
+            ))),
+            &mut events,
+        )
+        .await;
+
+    assert_eq!(events.len(), 1);
+    let payload = serde_json::to_value(&events[0]).expect("serialize subagent turn event");
+    assert_eq!(payload["event_params"]["thread_id"], "thread-subagent");
+    assert_eq!(payload["event_params"]["turn_id"], "turn-subagent");
+    assert_eq!(payload["event_params"]["parent_thread_id"], "thread-1");
+    assert_eq!(payload["event_params"]["parent_turn_id"], "parent-turn-1");
+}
+
+#[tokio::test]
 async fn subagent_tool_items_inherit_parent_connection_metadata() {
     let mut reducer = AnalyticsReducer::default();
     let mut events = Vec::new();
@@ -3664,6 +3751,7 @@ fn turn_event_serializes_expected_shape() {
             initialization_mode: ThreadInitializationMode::New,
             subagent_source: None,
             parent_thread_id: None,
+            parent_turn_id: None,
             model: Some("gpt-5".to_string()),
             model_provider: "openai".to_string(),
             sandbox_policy: Some("read_only"),
@@ -3736,6 +3824,7 @@ fn turn_event_serializes_expected_shape() {
                 "initialization_mode": "new",
                 "subagent_source": null,
                 "parent_thread_id": null,
+                "parent_turn_id": null,
                 "model": "gpt-5",
                 "model_provider": "openai",
                 "sandbox_policy": "read_only",
@@ -4053,6 +4142,7 @@ async fn turn_lifecycle_emits_turn_event() {
         json!("session-thread-2")
     );
     assert_eq!(payload["event_params"]["turn_id"], json!("turn-2"));
+    assert_eq!(payload["event_params"]["parent_turn_id"], json!(null));
     assert_eq!(
         payload["event_params"]["app_server_client"],
         json!({

@@ -203,7 +203,7 @@ pub(crate) async fn run_codex_thread_one_shot(
         auth_manager,
         models_manager,
         parent_session,
-        parent_ctx,
+        Arc::clone(&parent_ctx),
         child_cancel.clone(),
         subagent_source,
         initial_history,
@@ -211,13 +211,16 @@ pub(crate) async fn run_codex_thread_one_shot(
     .await?;
 
     // Send the initial input to kick off the one-shot turn.
-    io.submit(Op::UserInput {
-        items: input,
-        final_output_json_schema,
-        responsesapi_client_metadata: None,
-        additional_context: Default::default(),
-        thread_settings: Default::default(),
-    })
+    io.submit_with_parent_turn_id(
+        Op::UserInput {
+            items: input,
+            final_output_json_schema,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        },
+        Some(parent_ctx.sub_id.clone()),
+    )
     .await?;
 
     // Bridge events so we can observe completion and shut down automatically.
@@ -240,6 +243,7 @@ pub(crate) async fn run_codex_thread_one_shot(
                         id: "shutdown".to_string(),
                         op: Op::Shutdown {},
                         client_user_message_id: None,
+                        parent_turn_id: None,
                         trace: None,
                     })
                     .await;

@@ -710,7 +710,17 @@ impl Codex {
 
     /// Submit the `op` wrapped in a `Submission` with a unique ID.
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
-        self.submit_with_trace(op, /*trace*/ None).await
+        self.submit_with_parent_turn_id(op, /*parent_turn_id*/ None)
+            .await
+    }
+
+    pub(crate) async fn submit_with_parent_turn_id(
+        &self,
+        op: Op,
+        parent_turn_id: Option<String>,
+    ) -> CodexResult<String> {
+        self.submit_with_trace_and_parent_turn_id(op, /*trace*/ None, parent_turn_id)
+            .await
     }
 
     pub async fn submit_with_trace(
@@ -718,11 +728,22 @@ impl Codex {
         op: Op,
         trace: Option<W3cTraceContext>,
     ) -> CodexResult<String> {
+        self.submit_with_trace_and_parent_turn_id(op, trace, /*parent_turn_id*/ None)
+            .await
+    }
+
+    async fn submit_with_trace_and_parent_turn_id(
+        &self,
+        op: Op,
+        trace: Option<W3cTraceContext>,
+        parent_turn_id: Option<String>,
+    ) -> CodexResult<String> {
         let id = Uuid::now_v7().to_string();
         let sub = Submission {
             id: id.clone(),
             op,
             client_user_message_id: None,
+            parent_turn_id,
             trace,
         };
         self.submit_with_id(sub).await?;
@@ -741,6 +762,7 @@ impl Codex {
             id: id.clone(),
             op,
             client_user_message_id,
+            parent_turn_id: None,
             trace,
         };
         self.submit_with_id(sub).await?;
@@ -1180,6 +1202,7 @@ impl Session {
                 additional_context: Default::default(),
                 thread_settings: Default::default(),
             },
+            /*parent_turn_id*/ None,
             /*client_user_message_id*/ None,
         )
         .await;
