@@ -4,16 +4,20 @@ use anyhow::Result;
 use codex_core::config::Constrained;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::user_input::UserInput;
 use core_test_support::fs_wait;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
@@ -29,6 +33,194 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use tempfile::TempDir;
+use wiremock::ResponseTemplate;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_compacts_between_reviews_before_the_next_request() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    const FIRST_REVIEW_TOTAL_TOKENS: i64 = 500_000;
+    const AUTO_COMPACT_TOKEN_LIMIT: i64 = 200_000;
+    const COMPACT_RESPONSE_DELAY: Duration = Duration::from_secs(/*secs*/ 1);
+
+    let server = start_mock_server().await;
+    let approval_policy = AskForApproval::OnRequest;
+    let sandbox_policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![],
+        network_access: false,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+    let sandbox_policy_for_config = sandbox_policy.clone();
+    let test = test_codex()
+        .with_config(move |config| {
+            config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+            config
+                .set_legacy_sandbox_policy(sandbox_policy_for_config)
+                .expect("set sandbox policy");
+            config.model_auto_compact_token_limit = Some(AUTO_COMPACT_TOKEN_LIMIT);
+            config.model_auto_compact_token_limit_scope =
+                AutoCompactTokenLimitScope::BodyAfterPrefix;
+            config.model_context_window = Some(400_000);
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
+        })
+        .build(&server)
+        .await?;
+    let first_tool_gate = test.cwd.path().join("release-first-tool");
+    let second_justification = "Approve the second eager-compaction command.";
+    let first_args = json!({
+        "cmd": format!(
+            "while [ ! -f {} ]; do sleep 0.01; done; printf first",
+            shlex::try_join([first_tool_gate.to_string_lossy().as_ref()])?
+        ),
+        "yield_time_ms": 1_000_u64,
+        "sandbox_permissions": SandboxPermissions::RequireEscalated,
+        "justification": "Approve the first eager-compaction command.",
+    });
+    let second_args = json!({
+        "cmd": "printf second",
+        "yield_time_ms": 1_000_u64,
+        "sandbox_permissions": SandboxPermissions::RequireEscalated,
+        "justification": second_justification,
+    });
+    let mut first_guardian_completed =
+        ev_completed_with_tokens("resp-guardian-first", FIRST_REVIEW_TOTAL_TOKENS);
+    first_guardian_completed["response"]["usage"]["input_tokens"] = 10_000.into();
+    first_guardian_completed["response"]["usage"]["output_tokens"] = 490_000.into();
+    let sse_response = |body| {
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(body)
+    };
+    let responses = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(sse(vec![
+                ev_response_created("resp-parent-first-tool"),
+                ev_function_call(
+                    "exec-first",
+                    "exec_command",
+                    &serde_json::to_string(&first_args)?,
+                ),
+                ev_completed("resp-parent-first-tool"),
+            ])),
+            sse_response(sse(vec![
+                ev_response_created("resp-guardian-first"),
+                ev_assistant_message("msg-guardian-first", r#"{"outcome":"allow"}"#),
+                first_guardian_completed,
+            ])),
+            sse_response(sse(vec![
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": "EAGER_GUARDIAN_COMPACTED_CONTEXT",
+                    },
+                }),
+                ev_completed("resp-eager-guardian-compact"),
+            ]))
+            .set_delay(COMPACT_RESPONSE_DELAY),
+            sse_response(sse(vec![
+                ev_response_created("resp-parent-second-tool"),
+                ev_function_call(
+                    "exec-second",
+                    "exec_command",
+                    &serde_json::to_string(&second_args)?,
+                ),
+                ev_completed("resp-parent-second-tool"),
+            ])),
+            sse_response(sse(vec![
+                ev_response_created("resp-guardian-second"),
+                ev_assistant_message("msg-guardian-second", r#"{"outcome":"allow"}"#),
+                ev_completed("resp-guardian-second"),
+            ])),
+            sse_response(sse(vec![
+                ev_response_created("resp-parent-done"),
+                ev_assistant_message("msg-parent-done", "done"),
+                ev_completed("resp-parent-done"),
+            ])),
+        ],
+    )
+    .await;
+    let responses_for_release = responses.clone();
+    let release_first_tool = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(/*secs*/ 30), async {
+            while responses_for_release.requests().len() < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("compact request was not observed"))?;
+        fs::write(first_tool_gate, "release")?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "run both commands that require Guardian review".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                environments: Some(local_selections(test.config.cwd.clone())),
+                approval_policy: Some(approval_policy),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                sandbox_policy: Some(sandbox_policy),
+                ..Default::default()
+            },
+        })
+        .await?;
+    for _ in 0..2 {
+        wait_for_event(&test.codex, |event| {
+            matches!(
+                event,
+                EventMsg::GuardianAssessment(assessment)
+                    if assessment.status == GuardianAssessmentStatus::InProgress
+            )
+        })
+        .await;
+    }
+    assert!(
+        responses
+            .requests()
+            .iter()
+            .all(|request| !request.body_contains_text(second_justification)),
+        "the second Guardian request must wait for eager compaction"
+    );
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    release_first_tool.await??;
+
+    let requests = responses.requests();
+    let second_guardian = requests
+        .iter()
+        .find(|request| request.body_contains_text(second_justification))
+        .expect("second Guardian request");
+    assert!(
+        second_guardian.body_contains_text("EAGER_GUARDIAN_COMPACTED_CONTEXT"),
+        "the second Guardian request must use the installed compacted history"
+    );
+    let compact_request_count = requests
+        .iter()
+        .filter(|request| {
+            request
+                .header("x-codex-turn-metadata")
+                .and_then(|metadata| serde_json::from_str::<Value>(&metadata).ok())
+                .is_some_and(|metadata| metadata["request_kind"] == "compaction")
+        })
+        .count();
+    assert_eq!(compact_request_count, 1);
+
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_review_session_does_not_inherit_legacy_notify() -> Result<()> {
