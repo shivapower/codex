@@ -50,7 +50,16 @@ enum CancelLoginError {
 enum RefreshTokenRequestOutcome {
     NotAttemptedOrSucceeded,
     FailedTransiently,
-    FailedPermanently,
+    FailedPermanently(RefreshTokenFailedReason),
+}
+
+impl RefreshTokenRequestOutcome {
+    fn failed_reason(&self) -> Option<RefreshTokenFailedReason> {
+        match self {
+            Self::NotAttemptedOrSucceeded | Self::FailedTransiently => None,
+            Self::FailedPermanently(reason) => Some(*reason),
+        }
+    }
 }
 
 impl Drop for ActiveLogin {
@@ -760,12 +769,11 @@ impl AccountRequestProcessor {
             return RefreshTokenRequestOutcome::NotAttemptedOrSucceeded;
         }
         if do_refresh && let Err(err) = self.auth_manager.refresh_token().await {
-            let failed_reason = err.failed_reason();
-            if failed_reason.is_none() {
-                tracing::warn!("failed to refresh token while getting account: {err}");
-                return RefreshTokenRequestOutcome::FailedTransiently;
+            if let Some(reason) = err.failed_reason() {
+                return RefreshTokenRequestOutcome::FailedPermanently(reason);
             }
-            return RefreshTokenRequestOutcome::FailedPermanently;
+            tracing::warn!("failed to refresh token while getting account: {err}");
+            return RefreshTokenRequestOutcome::FailedTransiently;
         }
         RefreshTokenRequestOutcome::NotAttemptedOrSucceeded
     }
@@ -777,7 +785,7 @@ impl AccountRequestProcessor {
         let include_token = params.include_token.unwrap_or(false);
         let do_refresh = params.refresh_token.unwrap_or(false);
 
-        self.refresh_token_if_requested(do_refresh).await;
+        let refresh_outcome = self.refresh_token_if_requested(do_refresh).await;
 
         // Determine whether auth is required based on the active model provider.
         // If a custom provider is configured with `requires_openai_auth == false`,
@@ -788,6 +796,7 @@ impl AccountRequestProcessor {
             GetAuthStatusResponse {
                 auth_method: None,
                 auth_token: None,
+                refresh_failure_reason: None,
                 requires_openai_auth: Some(false),
             }
         } else {
@@ -798,14 +807,17 @@ impl AccountRequestProcessor {
             };
             match auth {
                 Some(auth) => {
-                    let permanent_refresh_failure =
-                        self.auth_manager.refresh_failure_for_auth(&auth).is_some();
+                    let refresh_failure_reason = refresh_outcome.failed_reason().or_else(|| {
+                        self.auth_manager
+                            .refresh_failure_for_auth(&auth)
+                            .map(|failure| failure.reason)
+                    });
                     let auth_mode = auth.api_auth_mode();
                     let (reported_auth_method, token_opt) = if matches!(
                         auth,
                         CodexAuth::AgentIdentity(_) | CodexAuth::PersonalAccessToken(_)
                     ) || include_token
-                        && permanent_refresh_failure
+                        && refresh_failure_reason.is_some()
                     {
                         // This response cannot represent the metadata needed to reuse these
                         // credentials.
@@ -826,12 +838,14 @@ impl AccountRequestProcessor {
                     GetAuthStatusResponse {
                         auth_method: reported_auth_method,
                         auth_token: token_opt,
+                        refresh_failure_reason,
                         requires_openai_auth: Some(true),
                     }
                 }
                 None => GetAuthStatusResponse {
                     auth_method: None,
                     auth_token: None,
+                    refresh_failure_reason: None,
                     requires_openai_auth: Some(true),
                 },
             }
