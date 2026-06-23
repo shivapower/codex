@@ -9,6 +9,8 @@ pub fn merge_toml_values(base: &mut TomlValue, overlay: &TomlValue) {
 }
 
 fn merge_toml_values_at_path(base: &mut TomlValue, overlay: &TomlValue, path: &mut Vec<String>) {
+    replace_shell_environment_policy_filter_representation(base, overlay, path);
+
     if let TomlValue::Table(overlay_table) = overlay
         && let TomlValue::Table(base_table) = base
     {
@@ -31,6 +33,31 @@ fn merge_toml_values_at_path(base: &mut TomlValue, overlay: &TomlValue, path: &m
         }
     } else {
         *base = normalized_with_key_aliases(overlay, path);
+    }
+}
+
+/// Switching between legacy arrays and keyed filters replaces lower filter
+/// fields instead of attempting to reconcile the two representations.
+fn replace_shell_environment_policy_filter_representation(
+    base: &mut TomlValue,
+    overlay: &TomlValue,
+    path: &[String],
+) {
+    if !matches!(path, [policy] if policy == "shell_environment_policy") {
+        return;
+    }
+    let TomlValue::Table(base) = base else {
+        return;
+    };
+    let TomlValue::Table(overlay) = overlay else {
+        return;
+    };
+
+    if overlay.contains_key("filters") {
+        base.remove("exclude");
+        base.remove("include_only");
+    } else if overlay.contains_key("exclude") || overlay.contains_key("include_only") {
+        base.remove("filters");
     }
 }
 

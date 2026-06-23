@@ -1,5 +1,7 @@
+use crate::CONFIG_TOML_FILE;
 use crate::config_requirements::ConfigRequirements;
 use crate::config_requirements::ConfigRequirementsToml;
+use crate::format_config_layer_source;
 
 use super::fingerprint::record_origins;
 use super::fingerprint::version_for_toml;
@@ -7,6 +9,7 @@ use super::key_aliases::normalized_with_key_aliases;
 use super::merge::merge_toml_values;
 use crate::CloudConfigBundleLoader;
 use crate::ProfileV2Name;
+use crate::types::ShellEnvironmentPolicyToml;
 use codex_app_server_protocol::ConfigLayer;
 use codex_app_server_protocol::ConfigLayerMetadata;
 use codex_app_server_protocol::ConfigLayerSource;
@@ -275,6 +278,21 @@ impl ConfigLayerStack {
         requirements: ConfigRequirements,
         requirements_toml: ConfigRequirementsToml,
     ) -> std::io::Result<Self> {
+        // Validate enabled layers before merging to reject mixed forms and malformed entries
+        for layer in layers.iter().filter(|layer| !layer.is_disabled()) {
+            let Some(policy) = layer.config.get("shell_environment_policy") else {
+                continue;
+            };
+            let _: ShellEnvironmentPolicyToml = policy.clone().try_into().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid shell environment policy in {}: {error}",
+                        format_config_layer_source(&layer.name, CONFIG_TOML_FILE)
+                    ),
+                )
+            })?;
+        }
         let user_layer_index = verify_layer_ordering(&layers)?;
         Ok(Self {
             layers,

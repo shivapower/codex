@@ -2741,6 +2741,14 @@
       ],
       "type": "string"
     },
+    "ShellEnvironmentPolicyFilter": {
+      "description": "Assigns a shell environment variable pattern to the include-only or exclude set. Includes do not re-add variables removed by another exclude pattern.",
+      "enum": [
+        "include",
+        "exclude"
+      ],
+      "type": "string"
+    },
     "ShellEnvironmentPolicyInherit": {
       "oneOf": [
         {
@@ -2771,7 +2779,7 @@
       "description": "Policy for building the `env` when spawning a process via shell-like tools.",
       "properties": {
         "exclude": {
-          "description": "List of regular expressions.",
+          "description": "Legacy list of regular expressions to exclude.",
           "items": {
             "type": "string"
           },
@@ -2780,11 +2788,18 @@
         "experimental_use_profile": {
           "type": "boolean"
         },
+        "filters": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ShellEnvironmentPolicyFilter"
+          },
+          "description": "Pattern actions used by the canonical table representation.\n\nOrdinary config keeps accepting the legacy arrays above during the migration. Requirements will accept only this keyed form, keeping array compatibility isolated so the legacy fields can be deprecated later. Pattern keys merge case-sensitively across config layers even though the resulting patterns match environment variable names case-insensitively.",
+          "type": "object"
+        },
         "ignore_default_excludes": {
           "type": "boolean"
         },
         "include_only": {
-          "description": "List of regular expressions.",
+          "description": "Legacy list of regular expressions to include.",
           "items": {
             "type": "string"
           },
@@ -5400,6 +5415,7 @@
       "default": {
         "exclude": null,
         "experimental_use_profile": null,
+        "filters": null,
         "ignore_default_excludes": null,
         "include_only": null,
         "inherit": null,

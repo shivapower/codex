@@ -124,3 +124,127 @@ fn merge_toml_values_normalizes_permission_network_domains_before_overlaying() {
     );
     assert_eq!(base, expected);
 }
+
+#[test]
+fn shell_environment_policy_legacy_array_overlay_replaces_legacy_array() {
+    let mut base = parse_toml(
+        r#"
+[shell_environment_policy]
+exclude = ["LOW_*", "SHARED_*"]
+"#,
+    );
+    let overlay = parse_toml(
+        r#"
+[shell_environment_policy]
+exclude = ["HIGH_*"]
+"#,
+    );
+
+    merge_toml_values(&mut base, &overlay);
+
+    assert_eq!(base, overlay);
+}
+
+#[test]
+fn shell_environment_policy_filters_overlay_merges_by_exact_key() {
+    let mut base = parse_toml(
+        r#"
+[shell_environment_policy.filters]
+"FLIP_*" = "exclude"
+"KEEP_*" = "include"
+"#,
+    );
+    let overlay = parse_toml(
+        r#"
+[shell_environment_policy.filters]
+"ADD_*" = "exclude"
+"flip_*" = "include"
+"#,
+    );
+
+    merge_toml_values(&mut base, &overlay);
+
+    assert_eq!(
+        base,
+        parse_toml(
+            r#"
+[shell_environment_policy.filters]
+"ADD_*" = "exclude"
+"FLIP_*" = "exclude"
+"KEEP_*" = "include"
+"flip_*" = "include"
+"#,
+        )
+    );
+}
+
+#[test]
+fn shell_environment_policy_filters_replace_lower_legacy_filter_fields() {
+    let mut base = parse_toml(
+        r#"
+[shell_environment_policy]
+inherit = "core"
+exclude = ["FLIP_TO_INCLUDE", "KEEP_EXCLUDED"]
+include_only = ["FLIP_TO_EXCLUDE", "KEEP_INCLUDED"]
+"#,
+    );
+    let overlay = parse_toml(
+        r#"
+[shell_environment_policy.filters]
+"ADD_INCLUDED" = "include"
+"FLIP_TO_EXCLUDE" = "exclude"
+"FLIP_TO_INCLUDE" = "include"
+"#,
+    );
+
+    merge_toml_values(&mut base, &overlay);
+
+    assert_eq!(
+        base,
+        parse_toml(
+            r#"
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.filters]
+"ADD_INCLUDED" = "include"
+"FLIP_TO_EXCLUDE" = "exclude"
+"FLIP_TO_INCLUDE" = "include"
+"#,
+        )
+    );
+}
+
+#[test]
+fn shell_environment_policy_legacy_arrays_replace_lower_filters() {
+    let mut base = parse_toml(
+        r#"
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.filters]
+"FLIP_TO_EXCLUDE" = "include"
+"LOW_EXCLUDED" = "exclude"
+"KEEP_INCLUDED" = "include"
+"#,
+    );
+    let overlay = parse_toml(
+        r#"
+[shell_environment_policy]
+exclude = ["FLIP_TO_EXCLUDE", "HIGH_EXCLUDED"]
+"#,
+    );
+
+    merge_toml_values(&mut base, &overlay);
+
+    assert_eq!(
+        base,
+        parse_toml(
+            r#"
+[shell_environment_policy]
+inherit = "core"
+exclude = ["FLIP_TO_EXCLUDE", "HIGH_EXCLUDED"]
+"#,
+        )
+    );
+}
