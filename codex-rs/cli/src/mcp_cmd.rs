@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -29,6 +30,8 @@ use codex_mcp::should_retry_without_scopes;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_rmcp_client::delete_oauth_tokens;
 use codex_rmcp_client::perform_oauth_login;
+use codex_rmcp_client::perform_oauth_login_print_callback_url;
+use codex_rmcp_client::resolve_mcp_oauth_callback_url;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::format_env_display;
 
@@ -39,6 +42,7 @@ use codex_utils_cli::format_env_display;
 /// - `remove` — delete a server entry
 /// - `login`  — authenticate with MCP server using OAuth
 /// - `logout` — remove OAuth credentials for MCP server
+/// - `callback-url` — print the OAuth callback URL for MCP server setup
 #[derive(Debug, clap::Parser)]
 pub struct McpCli {
     #[clap(flatten)]
@@ -56,6 +60,7 @@ pub enum McpSubcommand {
     Remove(RemoveArgs),
     Login(LoginArgs),
     Logout(LogoutArgs),
+    CallbackUrl(CallbackUrlArgs),
 }
 
 #[derive(Debug, clap::Parser)]
@@ -168,6 +173,12 @@ pub struct LogoutArgs {
     pub name: String,
 }
 
+#[derive(Debug, clap::Parser)]
+pub struct CallbackUrlArgs {
+    /// Name of the MCP server whose OAuth callback URL should be printed.
+    pub name: String,
+}
+
 impl McpCli {
     pub async fn run(self, loader_overrides: LoaderOverrides) -> Result<()> {
         let McpCli {
@@ -198,10 +209,19 @@ impl McpCli {
             McpSubcommand::Logout(args) => {
                 run_logout(&config_overrides, args).await?;
             }
+            McpSubcommand::CallbackUrl(args) => {
+                run_callback_url(&config_overrides, args).await?;
+            }
         }
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OAuthCallbackUrlOutput {
+    Print,
+    Suppress,
 }
 
 /// Preserve compatibility with servers that still expect the legacy empty-scope
@@ -220,8 +240,9 @@ async fn perform_oauth_login_retry_without_scopes(
     oauth_resource: Option<&str>,
     callback_port: Option<u16>,
     callback_url: Option<&str>,
-) -> Result<()> {
-    match perform_oauth_login(
+    callback_url_output: OAuthCallbackUrlOutput,
+) -> Result<Option<String>> {
+    match run_oauth_login(
         name,
         url,
         store_mode,
@@ -233,13 +254,14 @@ async fn perform_oauth_login_retry_without_scopes(
         oauth_resource,
         callback_port,
         callback_url,
+        callback_url_output,
     )
     .await
     {
-        Ok(()) => Ok(()),
+        Ok(callback_url) => Ok(callback_url),
         Err(err) if should_retry_without_scopes(resolved_scopes, &err) => {
             println!("OAuth provider rejected discovered scopes. Retrying without scopes…");
-            perform_oauth_login(
+            run_oauth_login(
                 name,
                 url,
                 store_mode,
@@ -251,10 +273,64 @@ async fn perform_oauth_login_retry_without_scopes(
                 oauth_resource,
                 callback_port,
                 callback_url,
+                callback_url_output,
             )
             .await
         }
         Err(err) => Err(err),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_oauth_login(
+    name: &str,
+    url: &str,
+    store_mode: codex_config::types::OAuthCredentialsStoreMode,
+    keyring_backend_kind: codex_config::types::AuthKeyringBackendKind,
+    http_headers: Option<HashMap<String, String>>,
+    env_http_headers: Option<HashMap<String, String>>,
+    scopes: &[String],
+    oauth_client_id: Option<&str>,
+    oauth_resource: Option<&str>,
+    callback_port: Option<u16>,
+    callback_url: Option<&str>,
+    callback_url_output: OAuthCallbackUrlOutput,
+) -> Result<Option<String>> {
+    match callback_url_output {
+        OAuthCallbackUrlOutput::Print => {
+            let output = perform_oauth_login_print_callback_url(
+                name,
+                url,
+                store_mode,
+                keyring_backend_kind,
+                http_headers,
+                env_http_headers,
+                scopes,
+                oauth_client_id,
+                oauth_resource,
+                callback_port,
+                callback_url,
+            )
+            .await?;
+            Ok(Some(output.callback_url))
+        }
+        OAuthCallbackUrlOutput::Suppress => {
+            perform_oauth_login(
+                name,
+                url,
+                store_mode,
+                keyring_backend_kind,
+                http_headers,
+                env_http_headers,
+                scopes,
+                oauth_client_id,
+                oauth_resource,
+                callback_port,
+                callback_url,
+            )
+            .await?;
+            Ok(None)
+        }
     }
 }
 
@@ -362,9 +438,34 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
             .clone()
             .map(|client_id| McpServerOAuthConfig {
                 client_id: Some(client_id),
+                callback_url: None,
             }),
         oauth_resource: oauth_resource.clone(),
         tools: HashMap::new(),
+    };
+
+    let callback_url = match &transport {
+        McpServerTransportConfig::StreamableHttp { url, .. } => {
+            match resolve_mcp_oauth_callback_url(
+                url,
+                config.mcp_oauth_callback_port,
+                new_entry
+                    .oauth_callback_url()
+                    .or(config.mcp_oauth_callback_url.as_deref()),
+            ) {
+                Ok(callback_url) => Some(Ok(callback_url)),
+                Err(err)
+                    if config.mcp_oauth_callback_port.is_none()
+                        && config.mcp_oauth_callback_url.is_none() =>
+                {
+                    Some(Err(err))
+                }
+                Err(err) => {
+                    return Err(err).context("failed to resolve MCP OAuth callback URL");
+                }
+            }
+        }
+        _ => None,
     };
 
     servers.insert(name.clone(), new_entry);
@@ -376,7 +477,6 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         .with_context(|| format!("failed to write MCP servers to {}", codex_home.display()))?;
 
     println!("Added global MCP server '{name}'.");
-
     match oauth_login_support(&transport).await {
         McpOAuthLoginSupport::Supported(oauth_config) => {
             println!("Detected OAuth support. Starting OAuth flow…");
@@ -385,7 +485,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
                 /*configured_scopes*/ None,
                 oauth_config.discovered_scopes.clone(),
             );
-            perform_oauth_login_retry_without_scopes(
+            let persisted_callback_url = perform_oauth_login_retry_without_scopes(
                 &name,
                 &oauth_config.url,
                 config.mcp_oauth_credentials_store_mode,
@@ -396,16 +496,61 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
                 oauth_client_id.as_deref(),
                 oauth_resource.as_deref(),
                 config.mcp_oauth_callback_port,
-                config.mcp_oauth_callback_url.as_deref(),
+                servers
+                    .get(&name)
+                    .and_then(McpServerConfig::oauth_callback_url)
+                    .or(config.mcp_oauth_callback_url.as_deref()),
+                OAuthCallbackUrlOutput::Print,
             )
             .await?;
+            if let Some(callback_url) = persisted_callback_url {
+                persist_server_oauth_callback_url(&codex_home, &mut servers, &name, callback_url)
+                    .await?;
+            }
             println!("Successfully logged in.");
         }
-        McpOAuthLoginSupport::Unsupported => {}
-        McpOAuthLoginSupport::Unknown(_) => println!(
-            "MCP server may or may not require login. Run `codex mcp login {name}` to login."
-        ),
+        McpOAuthLoginSupport::Unsupported => print_precomputed_oauth_callback_url(&callback_url),
+        McpOAuthLoginSupport::Unknown(_) => {
+            print_precomputed_oauth_callback_url(&callback_url);
+            println!(
+                "MCP server may or may not require login. Run `codex mcp login {name}` to login."
+            );
+        }
     }
+
+    Ok(())
+}
+
+fn print_precomputed_oauth_callback_url(callback_url: &Option<Result<String>>) {
+    if let Some(Ok(callback_url)) = callback_url {
+        println!("OAuth callback URL: {callback_url}");
+    }
+}
+
+async fn persist_server_oauth_callback_url(
+    codex_home: &std::path::Path,
+    servers: &mut BTreeMap<String, McpServerConfig>,
+    name: &str,
+    callback_url: String,
+) -> Result<()> {
+    let server = servers
+        .get_mut(name)
+        .ok_or_else(|| anyhow!("No MCP server named '{name}' found."))?;
+    let oauth = server.oauth.get_or_insert(McpServerOAuthConfig {
+        client_id: None,
+        callback_url: None,
+    });
+
+    if oauth.callback_url.as_deref() == Some(callback_url.as_str()) {
+        return Ok(());
+    }
+
+    oauth.callback_url = Some(callback_url);
+    ConfigEditsBuilder::new(codex_home)
+        .replace_mcp_servers(servers)
+        .apply()
+        .await
+        .with_context(|| format!("failed to write MCP servers to {}", codex_home.display()))?;
 
     Ok(())
 }
@@ -491,10 +636,50 @@ async fn run_login(config_overrides: &CliConfigOverrides, login_args: LoginArgs)
         server.oauth_client_id(),
         server.oauth_resource.as_deref(),
         config.mcp_oauth_callback_port,
-        config.mcp_oauth_callback_url.as_deref(),
+        server
+            .oauth_callback_url()
+            .or(config.mcp_oauth_callback_url.as_deref()),
+        OAuthCallbackUrlOutput::Suppress,
     )
     .await?;
     println!("Successfully logged in to MCP server '{name}'.");
+    Ok(())
+}
+
+async fn run_callback_url(
+    config_overrides: &CliConfigOverrides,
+    callback_url_args: CallbackUrlArgs,
+) -> Result<()> {
+    let overrides = config_overrides
+        .parse_overrides()
+        .map_err(anyhow::Error::msg)?;
+    let config = Config::load_with_cli_overrides(overrides)
+        .await
+        .context("failed to load configuration")?;
+    let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(
+        config.codex_home.to_path_buf(),
+    )));
+    let mcp_servers = mcp_manager.configured_servers(&config).await;
+
+    let CallbackUrlArgs { name } = callback_url_args;
+
+    let Some(server) = mcp_servers.get(&name) else {
+        bail!("No MCP server named '{name}' found.");
+    };
+
+    let url = match &server.transport {
+        McpServerTransportConfig::StreamableHttp { url, .. } => url,
+        _ => bail!("OAuth callback URL is only available for streamable HTTP servers."),
+    };
+
+    let callback_url = resolve_mcp_oauth_callback_url(
+        url,
+        config.mcp_oauth_callback_port,
+        server
+            .oauth_callback_url()
+            .or(config.mcp_oauth_callback_url.as_deref()),
+    )?;
+    println!("{callback_url}");
     Ok(())
 }
 
@@ -1003,3 +1188,7 @@ fn format_mcp_status(config: &McpServerConfig) -> String {
         "disabled".to_string()
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_cmd_tests.rs"]
+mod tests;
