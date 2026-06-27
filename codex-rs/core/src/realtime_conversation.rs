@@ -720,7 +720,6 @@ struct PreparedRealtimeConversationStart {
     codex_response_item_prefix: Option<String>,
     codex_response_handoff_prefix: Option<String>,
     realtime_call_api_provider: Option<ApiProvider>,
-    requested_realtime_session_id: Option<String>,
     version: RealtimeWsVersion,
     session_config: RealtimeSessionConfig,
     transport: ConversationStartTransport,
@@ -804,7 +803,6 @@ async fn prepare_realtime_start(
         codex_response_item_prefix: params.codex_response_item_prefix,
         codex_response_handoff_prefix: params.codex_response_handoff_prefix,
         realtime_call_api_provider,
-        requested_realtime_session_id,
         version,
         session_config,
         transport,
@@ -970,7 +968,6 @@ async fn handle_start_inner(
         codex_response_item_prefix,
         codex_response_handoff_prefix,
         realtime_call_api_provider,
-        requested_realtime_session_id,
         version,
         session_config,
         transport,
@@ -992,24 +989,11 @@ async fn handle_start_inner(
         model_client: sess.services.model_client.clone(),
         sdp,
     };
-    let start_output = sess.conversation.start(start).await?;
-
-    info!("realtime conversation started");
-
-    sess.send_event_raw(Event {
-        id: sub_id.to_string(),
-        msg: EventMsg::RealtimeConversationStarted(RealtimeConversationStartedEvent {
-            realtime_session_id: requested_realtime_session_id,
-            version,
-        }),
-    })
-    .await;
-
     let RealtimeStartOutput {
         realtime_active,
         events_rx,
         sdp,
-    } = start_output;
+    } = sess.conversation.start(start).await?;
     if let Some(sdp) = sdp {
         sess.send_event_raw(Event {
             id: sub_id.to_string(),
@@ -1027,7 +1011,60 @@ async fn handle_start_inner(
             msg,
         };
         let mut end = RealtimeConversationEnd::TransportClosed;
-        while let Ok(event) = events_rx.recv().await {
+        let mut pending_events = Vec::new();
+        let realtime_session_id = loop {
+            match events_rx.recv().await {
+                Ok(RealtimeEvent::SessionUpdated {
+                    realtime_session_id,
+                    instructions,
+                }) => {
+                    let started_realtime_session_id = realtime_session_id.clone();
+                    pending_events.push(RealtimeEvent::SessionUpdated {
+                        realtime_session_id,
+                        instructions,
+                    });
+                    break Some(started_realtime_session_id);
+                }
+                Ok(RealtimeEvent::Error(message)) => {
+                    pending_events.push(RealtimeEvent::Error(message));
+                    end = RealtimeConversationEnd::Error;
+                    break None;
+                }
+                Ok(event) => pending_events.push(event),
+                Err(_) if !fanout_realtime_active.load(Ordering::Relaxed) => return,
+                Err(_) => {
+                    pending_events.push(RealtimeEvent::Error(
+                        "realtime conversation ended before the upstream session was created"
+                            .to_string(),
+                    ));
+                    end = RealtimeConversationEnd::Error;
+                    break None;
+                }
+            }
+        };
+        let startup_succeeded = realtime_session_id.is_some();
+        if let Some(realtime_session_id) = realtime_session_id {
+            info!(%realtime_session_id, "realtime conversation started");
+            sess_clone
+                .send_event_raw(ev(EventMsg::RealtimeConversationStarted(
+                    RealtimeConversationStartedEvent {
+                        realtime_session_id: Some(realtime_session_id),
+                        version,
+                    },
+                )))
+                .await;
+        }
+
+        let mut pending_events = pending_events.into_iter();
+        loop {
+            let event = match pending_events.next() {
+                Some(event) => event,
+                None if !startup_succeeded => break,
+                None => match events_rx.recv().await {
+                    Ok(event) => event,
+                    Err(_) => break,
+                },
+            };
             if !fanout_realtime_active.load(Ordering::Relaxed) {
                 break;
             }
