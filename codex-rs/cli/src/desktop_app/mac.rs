@@ -1,4 +1,6 @@
 use anyhow::Context as _;
+use codex_desktop_installation::discover_desktop_installation;
+use codex_desktop_installation::validate_desktop_installation_at;
 use std::ffi::CString;
 use std::path::Path;
 use std::path::PathBuf;
@@ -13,7 +15,7 @@ pub async fn run_mac_app_open_or_install(
     workspace: PathBuf,
     download_url_override: Option<String>,
 ) -> anyhow::Result<()> {
-    if let Some(app_path) = find_existing_codex_app_path() {
+    if let Some(app_path) = find_existing_codex_app_path().await? {
         eprintln!(
             "Opening Codex Desktop at {app_path}...",
             app_path = app_path.display()
@@ -63,18 +65,11 @@ fn is_apple_silicon_mac() -> bool {
         || macos_sysctl_flag("hw.optional.arm64").unwrap_or(false)
 }
 
-fn find_existing_codex_app_path() -> Option<PathBuf> {
-    candidate_codex_app_paths()
-        .into_iter()
-        .find(|candidate| candidate.is_dir())
-}
-
-fn candidate_codex_app_paths() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("/Applications/Codex.app")];
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(home).join("Applications").join("Codex.app"));
-    }
-    paths
+async fn find_existing_codex_app_path() -> anyhow::Result<Option<PathBuf>> {
+    let installation = tokio::task::spawn_blocking(discover_desktop_installation)
+        .await
+        .context("Desktop discovery task failed")??;
+    Ok(installation.map(|installation| installation.app_root().to_path_buf()))
 }
 
 async fn open_codex_app(app_path: &Path, workspace: &Path) -> anyhow::Result<()> {
@@ -160,11 +155,11 @@ async fn install_codex_app_bundle(app_in_volume: &Path) -> anyhow::Result<PathBu
 
         let dest_app = applications_dir.join("Codex.app");
         if dest_app.is_dir() {
-            return Ok(dest_app);
+            return validate_installed_codex_app(dest_app).await;
         }
 
         match copy_app_bundle(app_in_volume, &dest_app).await {
-            Ok(()) => return Ok(dest_app),
+            Ok(()) => return validate_installed_codex_app(dest_app).await,
             Err(err) => {
                 eprintln!(
                     "warning: failed to install Codex.app to {applications_dir}: {err}",
@@ -175,6 +170,19 @@ async fn install_codex_app_bundle(app_in_volume: &Path) -> anyhow::Result<PathBu
     }
 
     anyhow::bail!("failed to install Codex.app to any applications directory");
+}
+
+async fn validate_installed_codex_app(app_path: PathBuf) -> anyhow::Result<PathBuf> {
+    let candidate = app_path.clone();
+    let installation =
+        tokio::task::spawn_blocking(move || validate_desktop_installation_at(candidate))
+            .await
+            .context("Desktop validation task failed")??;
+    let app_path_display = app_path.display();
+    let installation = installation.with_context(|| {
+        format!("refusing to launch unverified Codex Desktop at {app_path_display}")
+    })?;
+    Ok(installation.app_root().to_path_buf())
 }
 
 fn candidate_applications_dirs() -> anyhow::Result<Vec<PathBuf>> {
