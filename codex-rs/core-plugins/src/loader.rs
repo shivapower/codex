@@ -56,6 +56,7 @@ use tracing::instrument;
 use tracing::warn;
 
 const DEFAULT_SKILLS_DIR_NAME: &str = "skills";
+const DEFAULT_AGENTS_DIR_NAME: &str = "agents";
 const DEFAULT_HOOKS_CONFIG_FILE: &str = "hooks/hooks.json";
 const DEFAULT_MCP_CONFIG_FILE: &str = ".mcp.json";
 const DEFAULT_APP_CONFIG_FILE: &str = ".app.json";
@@ -693,6 +694,7 @@ async fn load_plugin(
         manifest_description: None,
         root,
         enabled: plugin.enabled,
+        agent_roots: Vec::new(),
         skill_roots: Vec::new(),
         disabled_skill_paths: HashSet::new(),
         has_enabled_skills: false,
@@ -741,6 +743,7 @@ async fn load_plugin(
         } => {
             loaded_plugin.manifest_name = Some(manifest.display_name().to_string());
             loaded_plugin.manifest_description = manifest.description.clone();
+            loaded_plugin.agent_roots = plugin_agent_roots(&plugin_root, manifest_paths);
             loaded_plugin.skill_roots = plugin_skill_roots(&plugin_root, manifest_paths);
             let resolved_skills = load_plugin_skills(
                 &plugin_root,
@@ -899,6 +902,26 @@ fn plugin_skill_roots(
     paths.sort_unstable();
     paths.dedup();
     paths
+}
+
+fn plugin_agent_roots(
+    plugin_root: &AbsolutePathBuf,
+    manifest_paths: &PluginManifestPaths,
+) -> Vec<AbsolutePathBuf> {
+    let mut paths = default_agent_roots(plugin_root);
+    paths.extend(manifest_paths.agents.iter().cloned());
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}
+
+fn default_agent_roots(plugin_root: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
+    let agents_dir = plugin_root.join(DEFAULT_AGENTS_DIR_NAME);
+    if agents_dir.is_dir() {
+        vec![agents_dir]
+    } else {
+        Vec::new()
+    }
 }
 
 fn default_skill_roots(plugin_root: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
