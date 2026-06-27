@@ -2058,10 +2058,12 @@ dependencies = [
  "codex-app-server",
  "codex-app-server-protocol",
  "codex-arg0",
+ "codex-chatgpt",
  "codex-config",
  "codex-core",
  "codex-exec-server",
  "codex-feedback",
+ "codex-login",
  "codex-protocol",
  "codex-uds",
  "codex-utils-absolute-path",
@@ -2295,7 +2297,9 @@ name = "codex-chatgpt"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
+ "codex-backend-client",
  "codex-connectors",
  "codex-core",
  "codex-git-utils",
@@ -2309,6 +2313,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]
@@ -4089,6 +4094,7 @@ dependencies = [
  "codex-app-server-client",
  "codex-app-server-protocol",
  "codex-arg0",
+ "codex-chatgpt",
  "codex-cli",
  "codex-cloud-config",
  "codex-config",
