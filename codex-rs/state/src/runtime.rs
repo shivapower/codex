@@ -67,7 +67,7 @@ mod memories;
 mod recovery;
 mod remote_control;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod threads;
 
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
@@ -83,8 +83,10 @@ pub use recovery::RuntimeDbBackup;
 pub use recovery::backup_runtime_db_for_fresh_start;
 pub use recovery::is_sqlite_corruption_error;
 pub use recovery::runtime_db_path_for_corruption_error;
+pub use recovery::runtime_db_path_for_init_error;
 pub use recovery::sqlite_error_detail_is_corruption;
 pub use recovery::sqlite_error_detail_is_lock;
+pub use recovery::sqlite_error_detail_is_migration_incompatible;
 pub use remote_control::RemoteControlEnrollmentRecord;
 pub use threads::ThreadFilterOptions;
 
