@@ -19,6 +19,9 @@ use tokio::time::timeout;
 use ts_rs::TS;
 
 use crate::GitSha;
+use crate::safe_git::DISABLED_HOOKS_PATH;
+use crate::safe_git::EXECUTABLE_FILTER_CONFIG_PATTERN;
+use crate::safe_git::config_output_has_untrusted_executable_helpers;
 
 /// Return `true` if the project folder specified by the `Config` is inside a
 /// Git repository.
@@ -67,7 +70,6 @@ pub async fn get_git_repo_root_with_fs(
 
 /// Timeout for git commands to prevent freezing on large repositories
 const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(5);
-const DISABLED_HOOKS_PATH: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct GitInfo {
@@ -290,9 +292,17 @@ fn trim_git_suffix(value: &str) -> &str {
 
 pub async fn get_has_changes(cwd: &Path) -> Option<bool> {
     let git = Path::new("git");
+    if has_configured_executable_filters_from(git, cwd).await? {
+        return None;
+    }
     let fsmonitor = detect_local_fsmonitor_override(git, cwd).await;
-    let output =
-        run_git_command_with_timeout_from(git, &["status", "--porcelain"], cwd, fsmonitor).await?;
+    let output = run_git_command_with_timeout_from(
+        git,
+        &["status", "--porcelain", "--ignore-submodules=dirty"],
+        cwd,
+        fsmonitor,
+    )
+    .await?;
     if !output.status.success() {
         return None;
     }
@@ -443,12 +453,13 @@ async fn run_git_command_with_timeout_from(
     cwd: &Path,
     fsmonitor: crate::FsmonitorOverride,
 ) -> Option<std::process::Output> {
+    let disabled_hooks = format!("core.hooksPath={DISABLED_HOOKS_PATH}");
     let mut command = Command::new(git);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         // Keep internal Git commands independent of repository-selected hooks
-        // and fsmonitor helpers while preserving built-in fsmonitor acceleration.
-        .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
+        // while preserving built-in fsmonitor acceleration.
+        .args(["-c", &disabled_hooks])
         .args(["-c", fsmonitor.git_config_arg()])
         .args(args)
         .current_dir(cwd)
@@ -459,6 +470,36 @@ async fn run_git_command_with_timeout_from(
         Ok(Ok(output)) => Some(output),
         _ => None, // Timeout or error
     }
+}
+
+async fn has_configured_executable_filters_from(git: &Path, cwd: &Path) -> Option<bool> {
+    let mut command = Command::new(git);
+    command
+        .args([
+            "config",
+            "--null",
+            "--show-scope",
+            "--includes",
+            "--get-regexp",
+            EXECUTABLE_FILTER_CONFIG_PATTERN,
+        ])
+        .current_dir(cwd)
+        .kill_on_drop(true);
+    let output = match timeout(GIT_COMMAND_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        _ => return None,
+    };
+    if !output
+        .status
+        .code()
+        .is_some_and(|code| code == 0 || code == 1)
+    {
+        return None;
+    }
+
+    Some(config_output_has_untrusted_executable_helpers(
+        &output.stdout,
+    ))
 }
 
 async fn get_git_remotes(cwd: &Path) -> Option<Vec<String>> {
@@ -739,10 +780,20 @@ async fn find_closest_sha(cwd: &Path, branches: &[String], remotes: &[String]) -
 
 async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
     let git = Path::new("git");
+    if has_configured_executable_filters_from(git, cwd).await? {
+        return None;
+    }
     let fsmonitor = detect_local_fsmonitor_override(git, cwd).await;
     let output = run_git_command_with_timeout_from(
         git,
-        &["diff", "--no-textconv", "--no-ext-diff", &sha.0],
+        &[
+            "diff",
+            "--no-textconv",
+            "--no-ext-diff",
+            "--submodule=short",
+            "--ignore-submodules=dirty",
+            &sha.0,
+        ],
         cwd,
         fsmonitor,
     )
@@ -907,6 +958,109 @@ mod tests {
     use pretty_assertions::assert_eq;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    async fn run_git(repo_path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .await
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git command failed: {args:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    async fn create_test_git_repo(temp_dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let repo_path = temp_dir.path().join("repo");
+        std::fs::create_dir(&repo_path).expect("create repo dir");
+        run_git(&repo_path, &["init"]).await;
+        run_git(&repo_path, &["config", "user.name", "Test User"]).await;
+        run_git(&repo_path, &["config", "user.email", "test@example.com"]).await;
+        std::fs::write(repo_path.join("test.txt"), "test content").expect("write test file");
+        run_git(&repo_path, &["add", "."]).await;
+        run_git(&repo_path, &["commit", "-m", "initial"]).await;
+        repo_path
+    }
+
+    async fn configure_clean_filter(repo_path: &Path, tracked_path: &str) {
+        std::fs::write(
+            repo_path.join(".gitattributes"),
+            format!("{tracked_path} filter=x=y\n"),
+        )
+        .expect("write attributes");
+        run_git(repo_path, &["add", ".gitattributes"]).await;
+        run_git(repo_path, &["commit", "-m", "attributes"]).await;
+        run_git(
+            repo_path,
+            &[
+                "config",
+                "filter.x=y.clean",
+                "git config codex.filterran true && git hash-object --stdin",
+            ],
+        )
+        .await;
+
+        let tracked_file = repo_path.join(tracked_path);
+        let contents = std::fs::read_to_string(&tracked_file).expect("read tracked file");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::fs::write(tracked_file, contents).expect("refresh tracked file");
+    }
+
+    async fn configured_filter_ran(repo_path: &Path) -> bool {
+        let output = Command::new("git")
+            .args(["config", "--get", "codex.filterran"])
+            .current_dir(repo_path)
+            .output()
+            .await
+            .expect("read filter marker");
+        output.status.success()
+    }
+
+    async fn add_submodule_with_clean_filter(parent: &Path) {
+        let source = tempfile::tempdir().expect("submodule source");
+        let source_path = source.path();
+        run_git(source_path, &["init"]).await;
+        run_git(source_path, &["config", "user.name", "Test User"]).await;
+        run_git(source_path, &["config", "user.email", "test@example.com"]).await;
+        std::fs::write(source_path.join("nested.txt"), "original\n").expect("nested file");
+        std::fs::write(
+            source_path.join(".gitattributes"),
+            "nested.txt filter=codex-test\n",
+        )
+        .expect("nested attributes");
+        run_git(source_path, &["add", "."]).await;
+        run_git(source_path, &["commit", "-m", "seed"]).await;
+
+        run_git(
+            parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                source_path.to_str().expect("source path"),
+                "nested",
+            ],
+        )
+        .await;
+        run_git(parent, &["commit", "-m", "add submodule"]).await;
+        let nested = parent.join("nested");
+        run_git(
+            &nested,
+            &[
+                "config",
+                "filter.codex-test.clean",
+                "git config codex.filterran true && git hash-object --stdin",
+            ],
+        )
+        .await;
+        std::fs::write(nested.join("nested.txt"), "modified\n").expect("dirty nested file");
+    }
 
     #[test]
     fn canonicalize_git_remote_url_normalizes_github_variants() {
@@ -943,6 +1097,84 @@ mod tests {
         for remote in ["", "file:///tmp/repo", "github.com/openai", "/tmp/repo"] {
             assert_eq!(canonicalize_git_remote_url(remote), None);
         }
+    }
+
+    #[tokio::test]
+    async fn get_has_changes_rejects_configured_clean_filter_without_running_it() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo_path = create_test_git_repo(&temp_dir).await;
+        configure_clean_filter(&repo_path, "test.txt").await;
+
+        assert_eq!(get_has_changes(&repo_path).await, None);
+        assert!(!configured_filter_ran(&repo_path).await);
+    }
+
+    #[tokio::test]
+    async fn get_has_changes_does_not_enter_dirty_submodules() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo_path = create_test_git_repo(&temp_dir).await;
+        add_submodule_with_clean_filter(&repo_path).await;
+
+        assert_eq!(get_has_changes(&repo_path).await, Some(false));
+        assert!(!configured_filter_ran(&repo_path.join("nested")).await);
+    }
+
+    #[tokio::test]
+    async fn diff_against_sha_does_not_enter_dirty_submodules() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo_path = create_test_git_repo(&temp_dir).await;
+        add_submodule_with_clean_filter(&repo_path).await;
+        run_git(&repo_path, &["config", "diff.submodule", "diff"]).await;
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .await
+            .expect("read HEAD");
+        assert!(head.status.success());
+        let head = String::from_utf8(head.stdout).expect("utf8 HEAD");
+
+        assert!(
+            diff_against_sha(&repo_path, &GitSha::new(head.trim()))
+                .await
+                .is_some()
+        );
+        assert!(!configured_filter_ran(&repo_path.join("nested")).await);
+    }
+
+    #[tokio::test]
+    async fn git_diff_to_remote_rejects_configured_clean_filter_without_running_it() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo_path = create_test_git_repo(&temp_dir).await;
+        let remote_path = temp_dir.path().join("remote.git");
+        run_git(
+            temp_dir.path(),
+            &["init", "--bare", remote_path.to_str().unwrap()],
+        )
+        .await;
+        run_git(
+            &repo_path,
+            &["remote", "add", "origin", remote_path.to_str().unwrap()],
+        )
+        .await;
+        let branch_output = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .await
+            .expect("read branch");
+        assert!(branch_output.status.success(), "read branch");
+        let branch = String::from_utf8(branch_output.stdout)
+            .expect("branch utf8")
+            .trim()
+            .to_string();
+        run_git(&repo_path, &["push", "-u", "origin", &branch]).await;
+
+        configure_clean_filter(&repo_path, "test.txt").await;
+        run_git(&repo_path, &["push", "origin", &branch]).await;
+
+        assert!(git_diff_to_remote(&repo_path).await.is_none());
+        assert!(!configured_filter_ran(&repo_path).await);
     }
 
     #[cfg(unix)]

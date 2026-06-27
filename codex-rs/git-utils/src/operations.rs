@@ -5,8 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::GitToolingError;
-
-const DISABLED_HOOKS_PATH: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+use crate::safe_git::DISABLED_HOOKS_PATH;
 
 pub(crate) fn ensure_git_repository(path: &Path) -> Result<(), GitToolingError> {
     match run_git_for_stdout(
