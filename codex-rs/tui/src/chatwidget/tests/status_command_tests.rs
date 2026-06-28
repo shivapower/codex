@@ -1,5 +1,9 @@
 use super::*;
 use assert_matches::assert_matches;
+use codex_app_server_protocol::RateLimitResetCredit;
+use codex_app_server_protocol::RateLimitResetCreditStatus;
+use codex_app_server_protocol::RateLimitResetCreditsSummary;
+use codex_app_server_protocol::RateLimitResetType;
 use codex_utils_path_uri::PathUri;
 
 #[tokio::test]
@@ -46,7 +50,13 @@ async fn status_command_refresh_updates_cached_limits_for_future_status_outputs(
         other => panic!("expected rate-limit refresh request, got {other:?}"),
     };
 
-    chat.finish_status_rate_limit_refresh(first_request_id, vec![snapshot(/*percent*/ 92.0)]);
+    chat.finish_status_rate_limit_refresh(
+        first_request_id,
+        StatusRateLimitRefreshOutcome::Updated {
+            snapshots: vec![snapshot(/*percent*/ 92.0)],
+            rate_limit_reset_credits: None,
+        },
+    );
     drain_insert_history(&mut rx);
 
     chat.dispatch_command(SlashCommand::Status);
@@ -60,6 +70,101 @@ async fn status_command_refresh_updates_cached_limits_for_future_status_outputs(
         refreshed.contains("8% left"),
         "expected a future /status output to use refreshed cached limits, got: {refreshed}"
     );
+}
+
+#[tokio::test]
+async fn status_command_refresh_preserves_details_on_error_and_replaces_them_on_success() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    set_chatgpt_auth(&mut chat);
+
+    chat.dispatch_command(SlashCommand::Status);
+    let first_cell = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected first status output, got {other:?}"),
+    };
+    let first_request_id = match rx.try_recv() {
+        Ok(AppEvent::RefreshRateLimits {
+            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
+        }) => request_id,
+        other => panic!("expected first status refresh, got {other:?}"),
+    };
+    let detailed = RateLimitResetCreditsSummary {
+        available_count: 2,
+        credits: Some(vec![RateLimitResetCredit {
+            id: "credit-1".to_string(),
+            reset_type: RateLimitResetType::CodexRateLimits,
+            status: RateLimitResetCreditStatus::Available,
+            granted_at: 1_750_000_000,
+            expires_at: Some(1_900_000_000),
+        }]),
+    };
+    chat.finish_status_rate_limit_refresh(
+        first_request_id,
+        StatusRateLimitRefreshOutcome::Updated {
+            snapshots: vec![snapshot(/*percent*/ 92.0)],
+            rate_limit_reset_credits: Some(detailed),
+        },
+    );
+    let first_rendered = lines_to_single_string(&first_cell.display_lines(/*width*/ 100));
+    assert!(first_rendered.contains("#1 expires"), "{first_rendered}");
+    drain_insert_history(&mut rx);
+
+    chat.dispatch_command(SlashCommand::Status);
+    let second_cell = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected second status output, got {other:?}"),
+    };
+    assert!(
+        lines_to_single_string(&second_cell.display_lines(/*width*/ 100)).contains("#1 expires")
+    );
+    let second_request_id = match rx.try_recv() {
+        Ok(AppEvent::RefreshRateLimits {
+            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
+        }) => request_id,
+        other => panic!("expected second status refresh, got {other:?}"),
+    };
+    chat.finish_status_rate_limit_refresh(second_request_id, StatusRateLimitRefreshOutcome::Failed);
+    let failed_refresh = lines_to_single_string(&second_cell.display_lines(/*width*/ 100));
+    assert!(failed_refresh.contains("#1 expires"), "{failed_refresh}");
+
+    chat.dispatch_command(SlashCommand::Status);
+    let third_cell = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected third status output, got {other:?}"),
+    };
+    assert!(
+        lines_to_single_string(&third_cell.display_lines(/*width*/ 100)).contains("#1 expires")
+    );
+    let third_request_id = match rx.try_recv() {
+        Ok(AppEvent::RefreshRateLimits {
+            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
+        }) => request_id,
+        other => panic!("expected third status refresh, got {other:?}"),
+    };
+    chat.finish_status_rate_limit_refresh(
+        third_request_id,
+        StatusRateLimitRefreshOutcome::Updated {
+            snapshots: vec![snapshot(/*percent*/ 92.0)],
+            rate_limit_reset_credits: Some(RateLimitResetCreditsSummary {
+                available_count: 2,
+                credits: None,
+            }),
+        },
+    );
+
+    let refreshed = lines_to_single_string(&third_cell.display_lines(/*width*/ 100));
+    assert!(refreshed.contains("2 available"), "{refreshed}");
+    assert!(!refreshed.contains("expires"), "{refreshed}");
+
+    chat.dispatch_command(SlashCommand::Status);
+    let future = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => {
+            lines_to_single_string(&cell.display_lines(/*width*/ 100))
+        }
+        other => panic!("expected future status output, got {other:?}"),
+    };
+    assert!(future.contains("2 available"), "{future}");
+    assert!(!future.contains("expires"), "{future}");
 }
 
 #[tokio::test]
@@ -169,10 +274,22 @@ async fn status_command_overlapping_refreshes_update_matching_cells_only() {
         "expected /status to avoid transient refresh text in terminal history, got: {second_rendered}"
     );
 
-    chat.finish_status_rate_limit_refresh(first_request_id, Vec::new());
+    chat.finish_status_rate_limit_refresh(
+        first_request_id,
+        StatusRateLimitRefreshOutcome::Updated {
+            snapshots: Vec::new(),
+            rate_limit_reset_credits: None,
+        },
+    );
     pretty_assertions::assert_eq!(chat.refreshing_status_outputs.len(), 1);
 
-    chat.finish_status_rate_limit_refresh(second_request_id, vec![snapshot(/*percent*/ 92.0)]);
+    chat.finish_status_rate_limit_refresh(
+        second_request_id,
+        StatusRateLimitRefreshOutcome::Updated {
+            snapshots: vec![snapshot(/*percent*/ 92.0)],
+            rate_limit_reset_credits: None,
+        },
+    );
     assert!(chat.refreshing_status_outputs.is_empty());
 }
 
@@ -193,7 +310,13 @@ async fn account_update_rejects_stale_status_rate_limit_snapshots() {
         /*status_account_display*/ None, /*plan_type*/ None,
         /*has_chatgpt_account*/ true, /*has_codex_backend_auth*/ true,
     );
-    chat.finish_status_rate_limit_refresh(request_id, vec![snapshot(/*percent*/ 92.0)]);
+    chat.finish_status_rate_limit_refresh(
+        request_id,
+        StatusRateLimitRefreshOutcome::Updated {
+            snapshots: vec![snapshot(/*percent*/ 92.0)],
+            rate_limit_reset_credits: None,
+        },
+    );
 
     assert!(chat.rate_limit_snapshots_by_limit_id.is_empty());
 }

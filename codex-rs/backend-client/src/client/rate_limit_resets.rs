@@ -3,6 +3,7 @@
 use super::Client;
 use super::PathStyle;
 use crate::types::ConsumeRateLimitResetCreditResponse;
+use crate::types::RateLimitResetCreditsDetails;
 use crate::types::RateLimitStatusWithResetCredits;
 use crate::types::RateLimitsWithResetCredits;
 use anyhow::Result;
@@ -31,6 +32,13 @@ impl Client {
         self.decode_json(&url, &ct, &body)
     }
 
+    pub async fn get_rate_limit_reset_credits(&self) -> Result<RateLimitResetCreditsDetails> {
+        let url = self.rate_limit_reset_credits_url();
+        let req = self.http.get(&url).headers(self.headers());
+        let (body, ct) = self.exec_request(req, "GET", &url).await?;
+        self.decode_json(&url, &ct, &body)
+    }
+
     pub async fn consume_rate_limit_reset_credit(
         &self,
         redeem_request_id: &str,
@@ -50,6 +58,17 @@ impl Client {
         match self.path_style {
             PathStyle::CodexApi => format!("{}/api/codex/usage", self.base_url),
             PathStyle::ChatGptApi => format!("{}/wham/usage", self.base_url),
+        }
+    }
+
+    fn rate_limit_reset_credits_url(&self) -> String {
+        match self.path_style {
+            PathStyle::CodexApi => {
+                format!("{}/api/codex/rate-limit-reset-credits", self.base_url)
+            }
+            PathStyle::ChatGptApi => {
+                format!("{}/wham/rate-limit-reset-credits", self.base_url)
+            }
         }
     }
 
