@@ -10,6 +10,7 @@ use crate::version::CODEX_CLI_VERSION;
 use chrono::DateTime;
 use chrono::Local;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::RateLimitResetCreditsSummary;
 use codex_model_provider_info::WireApi;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
@@ -47,6 +48,9 @@ use super::rate_limits::compose_rate_limit_data_many;
 use super::rate_limits::format_status_limit_summary;
 use super::rate_limits::render_status_limit_progress_bar;
 use super::remote_connection::RemoteConnectionStatus;
+use super::reset_credits::RESET_CREDITS_LABEL;
+use super::reset_credits::StatusResetCreditsData;
+use super::reset_credits::compose_reset_credits_data;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_lines;
 use crate::wrapping::word_wrap_lines;
@@ -73,6 +77,7 @@ pub(crate) struct StatusTokenUsageData {
 #[derive(Debug)]
 struct StatusRateLimitState {
     rate_limits: StatusRateLimitData,
+    reset_credits: Option<StatusResetCreditsData>,
     refreshing_rate_limits: bool,
 }
 
@@ -85,9 +90,12 @@ impl StatusHistoryHandle {
     pub(crate) fn finish_rate_limit_refresh(
         &self,
         rate_limits: &[RateLimitSnapshotDisplay],
+        reset_credits: Option<&RateLimitResetCreditsSummary>,
+        plan_type: Option<PlanType>,
         now: DateTime<Local>,
     ) {
-        let rate_limits = if rate_limits.len() <= 1 {
+        let reset_credits = compose_reset_credits_data(reset_credits, rate_limits, plan_type);
+        let rate_limit_data = if rate_limits.len() <= 1 {
             compose_rate_limit_data(rate_limits.first(), now)
         } else {
             compose_rate_limit_data_many(rate_limits, now)
@@ -97,7 +105,8 @@ impl StatusHistoryHandle {
             .rate_limit_state
             .write()
             .expect("status history rate-limit state poisoned");
-        state.rate_limits = rate_limits;
+        state.rate_limits = rate_limit_data;
+        state.reset_credits = reset_credits;
         state.refreshing_rate_limits = false;
     }
 }
@@ -168,7 +177,7 @@ pub(crate) fn new_status_output_with_rate_limits(
     thread_name: Option<String>,
     forked_from: Option<ThreadId>,
     rate_limits: &[RateLimitSnapshotDisplay],
-    _plan_type: Option<PlanType>,
+    plan_type: Option<PlanType>,
     now: DateTime<Local>,
     model_name: &str,
     collaboration_mode: Option<&str>,
@@ -186,7 +195,8 @@ pub(crate) fn new_status_output_with_rate_limits(
         thread_name,
         forked_from,
         rate_limits,
-        _plan_type,
+        /*reset_credits*/ None,
+        plan_type,
         now,
         model_name,
         collaboration_mode,
@@ -209,7 +219,8 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     thread_name: Option<String>,
     forked_from: Option<ThreadId>,
     rate_limits: &[RateLimitSnapshotDisplay],
-    _plan_type: Option<PlanType>,
+    reset_credits: Option<&RateLimitResetCreditsSummary>,
+    plan_type: Option<PlanType>,
     now: DateTime<Local>,
     model_name: &str,
     collaboration_mode: Option<&str>,
@@ -229,7 +240,8 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
         thread_name,
         forked_from,
         rate_limits,
-        _plan_type,
+        reset_credits,
+        plan_type,
         now,
         model_name,
         collaboration_mode,
@@ -257,7 +269,8 @@ impl StatusHistoryCell {
         thread_name: Option<String>,
         forked_from: Option<ThreadId>,
         rate_limits: &[RateLimitSnapshotDisplay],
-        _plan_type: Option<PlanType>,
+        reset_credits: Option<&RateLimitResetCreditsSummary>,
+        plan_type: Option<PlanType>,
         now: DateTime<Local>,
         model_name: &str,
         collaboration_mode: Option<&str>,
@@ -340,6 +353,7 @@ impl StatusHistoryCell {
             output: total_usage.output_tokens,
             context_window,
         };
+        let reset_credits = compose_reset_credits_data(reset_credits, rate_limits, plan_type);
         let rate_limits = if rate_limits.len() <= 1 {
             compose_rate_limit_data(rate_limits.first(), now)
         } else {
@@ -347,6 +361,7 @@ impl StatusHistoryCell {
         };
         let rate_limit_state = Arc::new(RwLock::new(StatusRateLimitState {
             rate_limits,
+            reset_credits,
             refreshing_rate_limits,
         }));
         let agents_summary = Arc::new(RwLock::new(agents_summary));
@@ -413,38 +428,35 @@ impl StatusHistoryCell {
         available_inner_width: usize,
         formatter: &FieldFormatter,
     ) -> Vec<Line<'static>> {
-        match &state.rate_limits {
+        let (mut lines, show_stale_warning) = match &state.rate_limits {
             StatusRateLimitData::Available(rows_data) => {
                 if rows_data.is_empty() {
-                    return vec![formatter.line(
-                        "Limits",
-                        vec![Span::from("not available for this account").dim()],
-                    )];
+                    (
+                        vec![formatter.line(
+                            "Limits",
+                            vec![Span::from("not available for this account").dim()],
+                        )],
+                        false,
+                    )
+                } else {
+                    (
+                        self.rate_limit_row_lines(rows_data, available_inner_width, formatter),
+                        false,
+                    )
                 }
-
-                self.rate_limit_row_lines(rows_data, available_inner_width, formatter)
             }
-            StatusRateLimitData::Stale(rows_data) => {
-                let mut lines =
-                    self.rate_limit_row_lines(rows_data, available_inner_width, formatter);
-                lines.push(formatter.line(
-                    "Warning",
-                    vec![Span::from(if state.refreshing_rate_limits {
-                        "limits may be stale - run /status again shortly."
-                    } else {
-                        "limits may be stale - start new turn to refresh."
-                    })
-                    .dim()],
-                ));
-                lines
-            }
-            StatusRateLimitData::Unavailable => {
+            StatusRateLimitData::Stale(rows_data) => (
+                self.rate_limit_row_lines(rows_data, available_inner_width, formatter),
+                true,
+            ),
+            StatusRateLimitData::Unavailable => (
                 vec![formatter.line(
                     "Limits",
                     vec![Span::from("not available for this account").dim()],
-                )]
-            }
-            StatusRateLimitData::Missing => {
+                )],
+                false,
+            ),
+            StatusRateLimitData::Missing => (
                 vec![formatter.line(
                     "Limits",
                     vec![Span::from(if state.refreshing_rate_limits {
@@ -453,9 +465,55 @@ impl StatusHistoryCell {
                         "data not available yet"
                     })
                     .dim()],
-                )]
-            }
+                )],
+                false,
+            ),
+        };
+
+        if let Some(reset_credits) = state.reset_credits.as_ref() {
+            lines.extend(self.reset_credit_lines(reset_credits, available_inner_width, formatter));
         }
+        if show_stale_warning {
+            lines.push(formatter.line(
+                "Warning",
+                vec![Span::from(if state.refreshing_rate_limits {
+                        "limits may be stale - run /status again shortly."
+                    } else {
+                        "limits may be stale - start new turn to refresh."
+                    })
+                    .dim()],
+            ));
+        }
+        lines
+    }
+
+    fn reset_credit_lines(
+        &self,
+        reset_credits: &StatusResetCreditsData,
+        available_inner_width: usize,
+        formatter: &FieldFormatter,
+    ) -> Vec<Line<'static>> {
+        let mut lines = vec![formatter.line(
+            RESET_CREDITS_LABEL,
+            vec![Span::from(reset_credits.summary.clone())],
+        )];
+        let detail_width = formatter.value_width(available_inner_width).max(1);
+        for detail in &reset_credits.details {
+            let mut spans = vec![Span::from(detail.text.clone()).dim()];
+            if let Some(scope) = detail.scope {
+                spans.push(Span::from("   ").dim());
+                spans.push(Span::from(scope).dim());
+            }
+            lines.extend(
+                word_wrap_lines(
+                    [Line::from(spans)],
+                    RtOptions::new(detail_width).break_words(false),
+                )
+                .into_iter()
+                .map(|line| formatter.continuation(line.spans)),
+            );
+        }
+        lines
     }
 
     fn rate_limit_row_lines(
@@ -572,6 +630,9 @@ impl StatusHistoryCell {
             }
             StatusRateLimitData::Unavailable => push_label(labels, seen, "Limits"),
             StatusRateLimitData::Missing => push_label(labels, seen, "Limits"),
+        }
+        if state.reset_credits.is_some() {
+            push_label(labels, seen, RESET_CREDITS_LABEL);
         }
     }
 }

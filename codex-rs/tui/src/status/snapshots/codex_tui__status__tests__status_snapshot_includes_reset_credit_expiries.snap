@@ -1,0 +1,25 @@
+---
+source: tui/src/status/tests.rs
+expression: wide
+---
+/status
+
+╭───────────────────────────────────────────────────────────────────────────────────╮
+│  >_ OpenAI Codex (v0.0.0)                                                         │
+│                                                                                   │
+│ Visit https://chatgpt.com/codex/settings/usage for up-to-date                     │
+│ information on rate limits and credits                                            │
+│                                                                                   │
+│  Model:                gpt-5.1-codex (reasoning none, summaries auto)             │
+│  Directory: [[workspace]]                                                         │
+│  Permissions:          Custom (workspace with network access, Ask for approval)   │
+│  Agents.md:            <none>                                                     │
+│                                                                                   │
+│  Token usage:          2K total  (1.4K input + 600 output)                        │
+│  Context window:       100% left (2.2K used / 272K)                               │
+│  5h limit:             [████████████████░░░░] 82% left (resets 10:10)             │
+│  Weekly limit:         [████████░░░░░░░░░░░░] 39% left (resets 15:37 on 20 Jun)   │
+│  Usage limit resets:   2 available                                                │
+│                        #1 expires 09:39 on 18 Jun 2026   Full reset (Weekly + 5h) │
+│                        #2 expires 08:59 on 27 Jun 2026   Full reset (Weekly + 5h) │
+╰───────────────────────────────────────────────────────────────────────────────────╯

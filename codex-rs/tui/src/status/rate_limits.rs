@@ -94,6 +94,8 @@ impl RateLimitWindowDisplay {
 #[derive(Debug, Clone)]
 pub(crate) struct RateLimitSnapshotDisplay {
     /// Canonical limit identifier (for example: `codex` or `codex_other`).
+    pub limit_id: String,
+    /// Display label for this limit, which may differ from `limit_id`.
     pub limit_name: String,
     /// Local timestamp representing when this display snapshot was captured.
     pub captured_at: DateTime<Local>,
@@ -147,6 +149,10 @@ pub(crate) fn rate_limit_snapshot_display_for_limit(
     captured_at: DateTime<Local>,
 ) -> RateLimitSnapshotDisplay {
     RateLimitSnapshotDisplay {
+        limit_id: snapshot
+            .limit_id
+            .clone()
+            .unwrap_or_else(|| "codex".to_string()),
         limit_name,
         captured_at,
         primary: snapshot
@@ -431,6 +437,7 @@ mod tests {
     fn non_codex_single_limit_renders_combined_row() {
         let now = Local::now();
         let codex = RateLimitSnapshotDisplay {
+            limit_id: "codex".to_string(),
             limit_name: "codex".to_string(),
             captured_at: now,
             primary: Some(window(/*used_percent*/ 10.0)),
@@ -443,6 +450,7 @@ mod tests {
             individual_limit: None,
         };
         let other = RateLimitSnapshotDisplay {
+            limit_id: "codex-other".to_string(),
             limit_name: "codex-other".to_string(),
             captured_at: now,
             primary: Some(window(/*used_percent*/ 20.0)),
@@ -477,6 +485,7 @@ mod tests {
     fn non_codex_multi_limit_keeps_group_row() {
         let now = Local::now();
         let other = RateLimitSnapshotDisplay {
+            limit_id: "codex-other".to_string(),
             limit_name: "codex-other".to_string(),
             captured_at: now,
             primary: Some(RateLimitWindowDisplay {

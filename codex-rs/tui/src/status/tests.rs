@@ -26,6 +26,10 @@ use chrono::TimeZone;
 use chrono::Utc;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::CreditsSnapshot;
+use codex_app_server_protocol::RateLimitResetCredit;
+use codex_app_server_protocol::RateLimitResetCreditStatus;
+use codex_app_server_protocol::RateLimitResetCreditsSummary;
+use codex_app_server_protocol::RateLimitResetType;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RateLimitWindow;
 use codex_app_server_protocol::SpendControlLimitSnapshot;
@@ -36,6 +40,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 use codex_protocol::ThreadId;
+use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ActivePermissionProfile;
@@ -59,6 +64,7 @@ use unicode_width::UnicodeWidthStr;
 fn stale_monthly_limit_marks_fresh_rolling_snapshot_stale() {
     let now = Local::now();
     let snapshot = RateLimitSnapshotDisplay {
+        limit_id: "codex".to_string(),
         limit_name: "codex".to_string(),
         captured_at: now,
         primary: Some(RateLimitWindowDisplay {
@@ -210,6 +216,97 @@ fn reset_at_from(captured_at: &chrono::DateTime<chrono::Local>, seconds: i64) ->
     (*captured_at + ChronoDuration::seconds(seconds))
         .with_timezone(&Utc)
         .timestamp()
+}
+
+#[derive(Clone, Copy)]
+enum ResetWindowFixture {
+    Monthly,
+    WeeklyAndFiveHour,
+}
+
+fn reset_credit(id: &str, expires_at: Option<i64>) -> RateLimitResetCredit {
+    RateLimitResetCredit {
+        id: id.to_string(),
+        reset_type: RateLimitResetType::CodexRateLimits,
+        status: RateLimitResetCreditStatus::Available,
+        granted_at: 1_750_000_000,
+        expires_at,
+    }
+}
+
+async fn render_reset_credit_status(
+    summary: &RateLimitResetCreditsSummary,
+    window: ResetWindowFixture,
+    plan_type: Option<PlanType>,
+    width: u16,
+) -> String {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex".to_string());
+    set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
+    let usage = TokenUsage {
+        input_tokens: 1_500,
+        cached_input_tokens: 100,
+        output_tokens: 600,
+        reasoning_output_tokens: 0,
+        total_tokens: 2_200,
+    };
+    let captured_at = Local
+        .with_ymd_and_hms(2026, 6, 17, 8, 0, 0)
+        .single()
+        .expect("timestamp");
+    let (primary_minutes, secondary_minutes) = match window {
+        ResetWindowFixture::Monthly => (43_200, None),
+        ResetWindowFixture::WeeklyAndFiveHour => (300, Some(10_080)),
+    };
+    let snapshot = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 18,
+            window_duration_mins: Some(primary_minutes),
+            resets_at: Some(reset_at_from(&captured_at, /*seconds*/ 7_800)),
+        }),
+        secondary: secondary_minutes.map(|window_duration_mins| RateLimitWindow {
+            used_percent: 61,
+            window_duration_mins: Some(window_duration_mins),
+            resets_at: Some(reset_at_from(&captured_at, /*seconds*/ 286_620)),
+        }),
+        credits: None,
+        individual_limit: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
+    let model_slug = get_model_offline_for_tests(config.model.as_deref());
+    let token_info = token_info_for(&model_slug, &config, &usage);
+    let (composite, _) = new_status_output_with_rate_limits_handle(
+        &config,
+        /*runtime_model_provider_base_url*/ None,
+        /*remote_connection*/ None,
+        test_status_account_display().as_ref(),
+        Some(&token_info),
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        std::slice::from_ref(&rate_display),
+        Some(summary),
+        plan_type,
+        captured_at,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        "<none>".to_string(),
+        /*refreshing_rate_limits*/ false,
+    );
+    let mut rendered_lines = render_lines(&composite.display_lines(width));
+    if cfg!(windows) {
+        for line in &mut rendered_lines {
+            *line = line.replace('\\', "/");
+        }
+    }
+    sanitize_directory(rendered_lines).join("\n")
 }
 
 fn permissions_text_for(config: &Config) -> Option<String> {
@@ -729,7 +826,8 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         /*thread_name*/ None,
         /*forked_from*/ None,
         /*rate_limits*/ &[],
-        None,
+        /*reset_credits*/ None,
+        /*plan_type*/ None,
         captured_at,
         &model_slug,
         /*collaboration_mode*/ None,
@@ -770,7 +868,8 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         /*thread_name*/ None,
         /*forked_from*/ None,
         /*rate_limits*/ &[],
-        None,
+        /*reset_credits*/ None,
+        /*plan_type*/ None,
         captured_at,
         &model_slug,
         /*collaboration_mode*/ None,
@@ -1560,7 +1659,8 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
         /*thread_name*/ None,
         /*forked_from*/ None,
         &[],
-        None,
+        /*reset_credits*/ None,
+        /*plan_type*/ None,
         now,
         &model_slug,
         /*collaboration_mode*/ None,
@@ -1627,7 +1727,7 @@ async fn status_snapshot_shows_refreshing_limits_notice() {
         /*thread_name*/ None,
         /*forked_from*/ None,
         std::slice::from_ref(&rate_display),
-        None,
+        /*plan_type*/ None,
         captured_at,
         &model_slug,
         /*collaboration_mode*/ None,
@@ -1713,6 +1813,109 @@ async fn status_snapshot_includes_credits_and_limits() {
     }
     let sanitized = sanitize_directory(rendered_lines).join("\n");
     assert_snapshot!(sanitized);
+}
+
+#[tokio::test]
+async fn status_snapshot_includes_reset_credit_expiries() {
+    let first_expiry = Local
+        .with_ymd_and_hms(2026, 6, 18, 9, 39, 0)
+        .single()
+        .expect("first expiry")
+        .timestamp();
+    let second_expiry = Local
+        .with_ymd_and_hms(2026, 6, 27, 8, 59, 0)
+        .single()
+        .expect("second expiry")
+        .timestamp();
+    let summary = RateLimitResetCreditsSummary {
+        available_count: 2,
+        credits: Some(vec![
+            reset_credit("credit-2", Some(second_expiry)),
+            reset_credit("credit-1", Some(first_expiry)),
+        ]),
+    };
+
+    let wide = render_reset_credit_status(
+        &summary,
+        ResetWindowFixture::WeeklyAndFiveHour,
+        Some(PlanType::Business),
+        /*width*/ 100,
+    )
+    .await;
+    assert_snapshot!("status_snapshot_includes_reset_credit_expiries", wide);
+
+    let narrow = render_reset_credit_status(
+        &summary,
+        ResetWindowFixture::WeeklyAndFiveHour,
+        Some(PlanType::Business),
+        /*width*/ 64,
+    )
+    .await;
+    assert_snapshot!(
+        "status_snapshot_wraps_reset_credit_expiries_in_narrow_terminal",
+        narrow
+    );
+}
+
+#[tokio::test]
+async fn status_reset_credit_scope_uses_monthly_window() {
+    let expiry = Local
+        .with_ymd_and_hms(2026, 7, 17, 9, 39, 0)
+        .single()
+        .expect("expiry")
+        .timestamp();
+    let summary = RateLimitResetCreditsSummary {
+        available_count: 1,
+        credits: Some(vec![reset_credit("credit-1", Some(expiry))]),
+    };
+
+    let rendered = render_reset_credit_status(
+        &summary,
+        ResetWindowFixture::Monthly,
+        Some(PlanType::Business),
+        /*width*/ 100,
+    )
+    .await;
+
+    assert!(rendered.contains("Full reset (Monthly)"), "{rendered}");
+    assert!(!rendered.contains("Weekly + 5h"), "{rendered}");
+}
+
+#[tokio::test]
+async fn status_reset_credit_zero_and_count_only_fallbacks() {
+    let zero = RateLimitResetCreditsSummary {
+        available_count: 0,
+        credits: Some(Vec::new()),
+    };
+    let rendered_zero = render_reset_credit_status(
+        &zero,
+        ResetWindowFixture::WeeklyAndFiveHour,
+        Some(PlanType::Business),
+        /*width*/ 100,
+    )
+    .await;
+    assert!(rendered_zero.contains("none available"), "{rendered_zero}");
+    assert!(!rendered_zero.contains("#1"), "{rendered_zero}");
+
+    let count_only = RateLimitResetCreditsSummary {
+        available_count: 2,
+        credits: None,
+    };
+    let rendered_count_only = render_reset_credit_status(
+        &count_only,
+        ResetWindowFixture::WeeklyAndFiveHour,
+        Some(PlanType::Business),
+        /*width*/ 100,
+    )
+    .await;
+    assert!(
+        rendered_count_only.contains("2 available"),
+        "{rendered_count_only}"
+    );
+    assert!(
+        !rendered_count_only.contains("expires"),
+        "{rendered_count_only}"
+    );
 }
 
 #[tokio::test]
@@ -1816,7 +2019,7 @@ async fn status_snapshot_treats_refreshing_empty_limits_as_unavailable() {
         /*thread_name*/ None,
         /*forked_from*/ None,
         std::slice::from_ref(&rate_display),
-        None,
+        /*plan_type*/ None,
         captured_at,
         &model_slug,
         /*collaboration_mode*/ None,

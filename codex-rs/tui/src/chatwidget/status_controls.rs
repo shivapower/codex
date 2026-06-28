@@ -6,6 +6,14 @@
 
 use super::*;
 
+pub(crate) enum StatusRateLimitRefreshOutcome {
+    Updated {
+        snapshots: Vec<RateLimitSnapshot>,
+        rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+    },
+    Failed,
+}
+
 impl ChatWidget {
     /// Update the status indicator header and details.
     ///
@@ -233,6 +241,7 @@ impl ChatWidget {
             self.thread_name.clone(),
             self.forked_from,
             rate_limit_snapshots.as_slice(),
+            self.rate_limit_reset_credits.as_ref(),
             self.plan_type,
             Local::now(),
             self.model_display_name(),
@@ -250,7 +259,7 @@ impl ChatWidget {
     pub(crate) fn finish_status_rate_limit_refresh(
         &mut self,
         request_id: u64,
-        snapshots: Vec<RateLimitSnapshot>,
+        outcome: StatusRateLimitRefreshOutcome,
     ) {
         if !self
             .refreshing_status_outputs
@@ -260,8 +269,15 @@ impl ChatWidget {
             return;
         }
 
-        for snapshot in snapshots {
-            self.on_rate_limit_snapshot(Some(snapshot));
+        if let StatusRateLimitRefreshOutcome::Updated {
+            snapshots,
+            rate_limit_reset_credits,
+        } = outcome
+        {
+            for snapshot in snapshots {
+                self.on_rate_limit_snapshot(Some(snapshot));
+            }
+            self.rate_limit_reset_credits = rate_limit_reset_credits;
         }
 
         let rate_limit_snapshots: Vec<RateLimitSnapshotDisplay> = self
@@ -269,13 +285,20 @@ impl ChatWidget {
             .values()
             .cloned()
             .collect();
+        let rate_limit_reset_credits = self.rate_limit_reset_credits.clone();
+        let plan_type = self.plan_type;
         let now = Local::now();
         let mut remaining = Vec::with_capacity(self.refreshing_status_outputs.len());
         let mut updated_any = false;
         for (pending_request_id, handle) in self.refreshing_status_outputs.drain(..) {
             if pending_request_id == request_id {
                 updated_any = true;
-                handle.finish_rate_limit_refresh(rate_limit_snapshots.as_slice(), now);
+                handle.finish_rate_limit_refresh(
+                    rate_limit_snapshots.as_slice(),
+                    rate_limit_reset_credits.as_ref(),
+                    plan_type,
+                    now,
+                );
             } else {
                 remaining.push((pending_request_id, handle));
             }

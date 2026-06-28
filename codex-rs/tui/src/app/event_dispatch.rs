@@ -860,8 +860,13 @@ impl App {
                             tui.frame_requester().schedule_frame();
                         }
                         RateLimitRefreshOrigin::StatusCommand { request_id } => {
-                            self.chat_widget
-                                .finish_status_rate_limit_refresh(request_id, snapshots);
+                            self.chat_widget.finish_status_rate_limit_refresh(
+                                request_id,
+                                crate::chatwidget::StatusRateLimitRefreshOutcome::Updated {
+                                    snapshots,
+                                    rate_limit_reset_credits,
+                                },
+                            );
                         }
                         RateLimitRefreshOrigin::UsageMenu { request_id } => {
                             self.chat_widget.finish_usage_menu_rate_limit_refresh(
@@ -895,8 +900,10 @@ impl App {
                             );
                         }
                         RateLimitRefreshOrigin::StatusCommand { request_id } => {
-                            self.chat_widget
-                                .finish_status_rate_limit_refresh(request_id, Vec::new());
+                            self.chat_widget.finish_status_rate_limit_refresh(
+                                request_id,
+                                crate::chatwidget::StatusRateLimitRefreshOutcome::Failed,
+                            );
                         }
                         RateLimitRefreshOrigin::UsageMenu { request_id } => {
                             self.chat_widget.finish_usage_menu_rate_limit_refresh(
